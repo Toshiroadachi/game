@@ -64,7 +64,12 @@
   }
   /* タイトル画面などではパッド類を隠す */
   body.menu #pad, body.menu #actBtn, body.menu #crouchBtn, body.menu #hackBtn { display: none; }
-  body.menu #soundBtn { top: 10px; }
+  #voiceBtn {
+    right: 60px; top: 84px; width: 44px; height: 44px; font-size: 15px;
+    background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.4);
+  }
+  #voiceBtn.off { opacity: 0.4; text-decoration: line-through; }
+  body.menu #soundBtn, body.menu #voiceBtn { top: 10px; }
   body.nohack #hackBtn { display: none; }
   /* マウス操作のPCでは少し控えめに表示 */
   @media (hover: hover) and (pointer: fine) {
@@ -79,6 +84,7 @@
 <div id="crouchBtn" class="btn">ほふく</div>
 <div id="hackBtn" class="btn">ハック</div>
 <div id="soundBtn" class="btn">🔊</div>
+<div id="voiceBtn" class="btn">声</div>
 
 <script>
 'use strict';
@@ -92,21 +98,21 @@ const CROUCH_SPEED = 70;         // ほふく時の移動速度
 const PLAYER_R = 12;             // 先頭の当たり判定の半径
 const MEMBER_R = 10;             // 後ろの隊員の当たり判定の半径
 const GUARD_R = 13;              // 見張りの当たり判定の半径
-const VIEW_RANGE = 200;          // 見張りの視界の距離
+const VIEW_RANGE = 215;          // 見張りの視界の距離
 const VIEW_ANGLE = Math.PI / 2.6;// 見張りの視野角（全体）
 const CAMERA_RANGE = 180;        // 監視カメラの視界の距離
 const CROUCH_RANGE_RATE = 0.6;   // ほふく中は見つかる距離が短くなる
-const STUN_TIME = 10;            // 麻酔で眠らせる時間（秒）
+const STUN_TIME = 9;             // 麻酔で眠らせる時間（秒）
 const PLAYER_VIEW_RANGE = 190;   // 先頭の視界（麻酔銃の射程）
 const PLAYER_VIEW_ANGLE = Math.PI / 2.8;
 const SHOT_COOLDOWN = 1.5;       // 麻酔銃を撃ってから次に撃てるまでの時間（秒）
 const CAUGHT_PENALTY = 30;       // 見張りに捕まった時に上がる警戒度
 const LASER_PENALTY = 34;        // 赤外線に触れた時に上がる警戒度
-const SUSPECT_BASE = 0.4;        // 見張りが怪しむ速さ（基本）
-const SUSPECT_NEAR = 1.6;        // 見張りが怪しむ速さ（近いほど加算）
-const ALERT_PER_SEC = 15;        // 発見されている間に毎秒上がる警戒度
+const SUSPECT_BASE = 0.5;        // 見張りが怪しむ速さ（基本）
+const SUSPECT_NEAR = 1.8;        // 見張りが怪しむ速さ（近いほど加算）
+const ALERT_PER_SEC = 18;        // 発見されている間に毎秒上がる警戒度
 const ALERT_DECAY = 6;           // 見つかっていない間に毎秒下がる警戒度
-const CHASE_SPEED = 112;         // 見張りが追いかける速さ
+const CHASE_SPEED = 120;         // 見張りが追いかける速さ
 const AMMO_PICKUP = 2;           // 弾薬箱で増える麻酔弾の数
 const HACK_TIME = 8;             // ハッキングでカメラ・ライトを止める時間（秒）
 const SQUAD_GAP = 22;            // 隊員どうしの間隔（ピクセル）
@@ -310,12 +316,14 @@ const Sound = (() => {
   function toggleMute() {
     muted = !muted;
     if (master) master.gain.value = muted ? 0 : 1.2;
+    if (muted && window.speechSynthesis) speechSynthesis.cancel();
     const b = document.getElementById('soundBtn');
     if (b) b.textContent = muted ? '🔇' : '🔊';
   }
 
   return {
     unlock, startBGM, stopBGM, setTension, toggleMute,
+    isMuted: () => muted,
     step: (soft) => {
       if (!ac) return;
       const t = ac.currentTime;
@@ -355,6 +363,62 @@ const Sound = (() => {
     clear:   () => [523, 659, 784, 1047, 784, 1047].forEach((f, i) => tone(f, f, i === 5 ? 0.5 : 0.18, 'square', 0.3, i * 0.14)),
     gameOver:() => [392, 370, 330, 311, 196].forEach((f, i) => tone(f, f * 0.97, 0.45, 'sawtooth', 0.35, i * 0.28)),
   };
+})();
+
+/* =========================================================
+   声（ブラウザに入っている読み上げ機能 speechSynthesis を使う）
+   ・人ごとに声の高さ・速さを変える。日本語の声が複数あれば男女で使い分ける
+   ・（ ）の中のト書きは読まない
+   ========================================================= */
+const Voice = (() => {
+  const synth = window.speechSynthesis;
+  let enabled = true;
+  try { enabled = localStorage.getItem('shaki_voice') !== '0'; } catch (e) {}
+  const PARAMS = {
+    '乃木':   { pitch: 0.9,  rate: 1.0,  g: 'm' },
+    'ノコル': { pitch: 0.7,  rate: 0.95, g: 'm' },
+    '新庄':   { pitch: 1.0,  rate: 1.08, g: 'm' },
+    'チョッキー': { pitch: 1.35, rate: 1.12, g: 'm' },
+    '東条':   { pitch: 0.8,  rate: 1.1,  g: 'm' },
+    '太田':   { pitch: 1.25, rate: 1.05, g: 'f' },
+    'ナレーション': { pitch: 1.0, rate: 0.95, g: 'n' },
+  };
+  function pickVoice(g) {
+    const vs = synth ? synth.getVoices().filter(v => /^ja/i.test(v.lang)) : [];
+    if (!vs.length) return null;
+    const fem = /kyoko|haruka|nanami|ayumi|sayaka|mizuki|o-ren|female|女性/i;
+    const mal = /otoya|ichiro|keita|daichi|hattori|male|男性/i;
+    if (g === 'f') return vs.find(v => fem.test(v.name)) || vs[0];
+    if (g === 'm') return vs.find(v => mal.test(v.name) && !fem.test(v.name)) || vs[0];
+    return vs[0];
+  }
+  function speak(who, text) {
+    if (!enabled || !synth || Sound.isMuted()) return;
+    const p = PARAMS[who] || PARAMS['ナレーション'];
+    const clean = text.replace(/（[^）]*）/g, '').replace(/…+/g, '、').trim();
+    if (!clean) return;
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(clean);
+    u.lang = 'ja-JP';
+    const v = pickVoice(p.g);
+    if (v) u.voice = v;
+    u.pitch = p.pitch; u.rate = p.rate; u.volume = 1;
+    synth.speak(u);
+  }
+  function stop() { if (synth) synth.cancel(); }
+  function updateBtn() {
+    const b = document.getElementById('voiceBtn');
+    if (b) b.classList.toggle('off', !enabled);
+  }
+  function toggle() {
+    enabled = !enabled;
+    try { localStorage.setItem('shaki_voice', enabled ? '1' : '0'); } catch (e) {}
+    if (!enabled) stop();
+    updateBtn();
+  }
+  if (synth) synth.getVoices();   // 声の一覧を読み込み始める
+  setTimeout(updateBtn, 0);
+  return { speak, stop, toggle, available: !!synth };
 })();
 
 /* =========================================================
@@ -429,7 +493,7 @@ const STAGES = [
     team: TEAM10,
     start: [2, 12],
     goal: [37, 11, 2, 3], goalLabel: '城門',
-    ammo: 4, hacks: 0,
+    ammo: 3, hacks: 0,
     ammoItems: [[19.5, 12.5]],
     rocks: [
       [6,4,2,3],[5,17,3,2],[11,6,3,3],[11,15,2,4],[15,2,2,5],[15,19,2,4],
@@ -473,7 +537,7 @@ const STAGES = [
     team: TEAM10,
     start: [3, 12],
     goal: [34, 11, 3, 3], goalLabel: '城内入口',
-    ammo: 4, hacks: 2,
+    ammo: 3, hacks: 2,
     ammoItems: [[15.5, 3.5], [28.5, 22.5]],
     rocks: [
       [4,9,1,1],[4,15,1,1],[14,10,1,1],[14,14,1,1],[15,5,2,1],[15,19,2,1],
@@ -534,29 +598,44 @@ const STAGES = [
     guards: [],
     // 赤外線（座標はマス）。type: static 常時 / blink 点滅 / move 動く
     //   high: true はオレンジ色の高い位置の線。ほふくでくぐれる
+    laserPenalty: 20,          // このステージは触れた時の警報を弱めにする（5回まで大丈夫）
     lasers: [
       { a: [7,4],  b: [7,11],  type: 'static', high: true },
-      { a: [10,4], b: [10,11], type: 'blink', period: 2.4, on: 1.3 },
-      { a: [15,4], b: [15,11], type: 'move', move: [2,0], speed: 1.2 },
-      { a: [19,4], b: [19,7],  type: 'static' },
-      { a: [19,8], b: [19,11], type: 'static' },
-      { a: [22,4], b: [22,11], type: 'blink', period: 1.8, on: 0.9 },
-      { a: [24,4], b: [24,11], type: 'blink', period: 1.8, on: 0.9, phase: 0.9 },
-      { a: [26,7.5], b: [30,7.5], type: 'move', move: [0,3.5], speed: 1.5 },
-      { a: [33,4], b: [33,11], type: 'static', high: true },
-      { a: [34.5,4], b: [34.5,11], type: 'blink', period: 2.2, on: 1.0, high: true },
+      { a: [11,4], b: [11,11], type: 'blink', period: 3.0, on: 1.2 },
+      { a: [15,4], b: [15,11], type: 'move', move: [1.5,0], speed: 0.8 },
+      { a: [20,4], b: [20,6.5], type: 'static' },
+      { a: [20,8.5], b: [20,11], type: 'static' },
+      { a: [24,4], b: [24,11], type: 'blink', period: 3.0, on: 1.2, phase: 1.5 },
+      { a: [27,7.5], b: [31,7.5], type: 'move', move: [0,3.5], speed: 0.9 },
+      { a: [34,4], b: [34,11], type: 'static', high: true },
+    ],
+    // 壁に書いた「抜け方」の案内
+    labels: [
+      { x: 7,  y: 3.6, text: '① ほふくでくぐる' },
+      { x: 11, y: 11.9, text: '② 消えたら進む' },
+      { x: 15, y: 3.6, text: '③ 離れた隙に抜ける' },
+      { x: 20, y: 11.9, text: '④ すき間を通る' },
+      { x: 24, y: 3.6, text: '⑤ 消えたら進む' },
+      { x: 29, y: 11.9, text: '⑥ 線が離れたら進む' },
+      { x: 34, y: 3.6, text: '⑦ ほふく' },
     ],
     hints: [
-      { area: [0,0,6,15],  text: '赤い線に触れると警報。オレンジの線は「ほふく」でくぐれる。' },
-      { area: [9,0,6,15],  text: '新庄：落ち着け、チョッキー。点滅のタイミングを見ろ。' },
-      { area: [18,0,6,15], text: '赤い線の切れ目（真ん中）をすり抜けろ。' },
-      { area: [25,0,7,15], text: 'チョッキー：……別班の滑り止めテープ、効いてる！ いける！' },
+      { area: [0,0,6,15],  text: 'オレンジの線は高い位置。「ほふく」ボタン（Cキー）で低くなってくぐれ。' },
+      { area: [9,0,5,15],  text: '新庄：点滅する線は、消えている間に通れ。消える前・つく前はチカチカする。' },
+      { area: [14,0,5,15], text: '動く線は、遠くへ離れた瞬間に通り抜けろ。' },
+      { area: [19,0,4,15], text: '真ん中に切れ目がある。すき間をまっすぐ通れ。' },
+      { area: [26,0,6,15], text: 'チョッキー：……別班の滑り止めテープ、効いてる！ 線が上か下に離れた時に進む！' },
+      { area: [32,0,6,15], text: '最後はほふくでくぐって、制御盤へ！' },
     ],
-    intro: '目標：赤外線を抜けて制御盤を止めろ',
+    intro: '目標：赤外線を抜けて制御盤を止めろ（壁の案内を見よう）',
     story: [
       ['新庄', 'この先の通路、赤外線センサーのトラップだらけだ。'],
       ['チョッキー', '……こんなの、聞いてないですよ。'],
-      ['新庄', 'お前ならできる。別班が開発した滑り止めテープを信じろ。'],
+      ['新庄', 'お前ならできる。別班が開発した滑り止めテープを信じろ。やり方を言うぞ。'],
+      ['新庄', 'オレンジの線は高い位置にある。「ほふく」で低くなれば、下をくぐれる。（ほふくボタン／Cキー）'],
+      ['新庄', '赤い線には触れるな。点滅する線は、消えている間に通り抜けろ。'],
+      ['新庄', '動く線は、離れた隙に。真ん中が切れている線は、そのすき間を通れ。'],
+      ['新庄', '触れても1回では終わらない。警戒度が100%になるまでは進める。落ち着いていけ。'],
       ['乃木', 'チョッキー、一人で抜けて制御盤を止めてくれ。その間、我々は待機する。'],
     ],
     clearText: '赤外線センサーを停止した',
@@ -573,7 +652,7 @@ const STAGES = [
     prisoners: [[33,3],[36,3],[33,6],[36,6]],   // 牢の中の別班員4人
     key: [12.5, 22.5],
     blackout: 12,                    // 鍵を取ると停電する時間（秒）
-    ammo: 4, hacks: 1,
+    ammo: 3, hacks: 1,
     ammoItems: [[4.5, 12.5], [37.5, 22.5]],
     labels: [{ x: 16, y: 24.6, text: '看守部屋' }, { x: 31, y: 24.6, text: '倉庫' }],
     torches: [[5,1.2],[13,9.2],[21,9.2],[29,9.2],[37,9.2],[16,15.3],[30,15.3],[2,15.3],[35,1.2]],
@@ -627,7 +706,7 @@ const STAGES = [
     // 追っ手：城門から次々に出てくる
     // spawns の中から、部隊の位置に近い所（やや前方まで）で現れる
     chase: { spawns: [[3.5,10],[10,1.5],[10,18.5],[22,1.5],[22,18.5],[34,1.5],[34,18.5]],
-             every: 3.5, max: 7, total: 18, first: 1.5, speed: 132 },
+             every: 3.5, max: 7, total: 18, first: 1.2, speed: 138 },
     // 東条の爆薬 A・B・C（A は不発、B は小さく、C は命中）
     bombs: [
       { at: [16, 10], label: 'A', kind: 'dud' },
@@ -715,6 +794,7 @@ window.addEventListener('keydown', e => {
   if (e.code === 'KeyC' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') toggleCrouch();
   if (e.code === 'KeyH') doHack();
   if (e.code === 'KeyM') Sound.toggleMute();
+  if (e.code === 'KeyV') Voice.toggle();
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
 
@@ -754,6 +834,8 @@ const hackBtn = document.getElementById('hackBtn');
 hackBtn.addEventListener('pointerdown', e => { e.preventDefault(); Sound.unlock(); doHack(); });
 const soundBtn = document.getElementById('soundBtn');
 soundBtn.addEventListener('pointerdown', e => { e.preventDefault(); Sound.unlock(); Sound.toggleMute(); });
+const voiceBtn = document.getElementById('voiceBtn');
+voiceBtn.addEventListener('pointerdown', e => { e.preventDefault(); Voice.toggle(); });
 window.addEventListener('pointerdown', () => Sound.unlock(), true);
 window.addEventListener('touchend', () => Sound.unlock(), true);
 // タイトル画面・会話などでは画面タップで進む
@@ -790,8 +872,9 @@ function startStory(title, lines, next) {
   scene = 'story';
   Sound.stopBGM();
   Sound.radio();
+  Voice.speak(...lines[0]);
 }
-function skipStory() { if (scene === 'story') { const n = storyNext; storyNext = null; n && n(); } }
+function skipStory() { if (scene === 'story') { Voice.stop(); const n = storyNext; storyNext = null; n && n(); } }
 // ステージの前の会話 → ステージ開始
 function goStage(i) {
   startStory(STAGES[i].name, STAGES[i].story, () => startStage(i));
@@ -801,7 +884,8 @@ function onAction() {
   if (scene === 'title') { goStage(titleSelect); return; }
   if (scene === 'story') {
     storyIdx++;
-    if (storyIdx >= storyLines.length) skipStory(); else Sound.radio();
+    if (storyIdx >= storyLines.length) skipStory();
+    else { Sound.radio(); Voice.speak(...storyLines[storyIdx]); }
     return;
   }
   if (scene === 'over')  { startStage(stageIndex); return; }
@@ -1156,7 +1240,11 @@ function update(dt) {
   const tx = player.x / TILE, ty = player.y / TILE;
   const h = (stage.hints || []).find(h => tx >= h.area[0] && tx < h.area[0] + h.area[2] &&
                                           ty >= h.area[1] && ty < h.area[1] + h.area[3]);
-  if (h && !shownHints.has(h) && hintTimer <= 0.3) { shownHints.add(h); hintText = h.text; hintTimer = 5; }
+  if (h && !shownHints.has(h) && hintTimer <= 0.3) {
+    shownHints.add(h); hintText = h.text; hintTimer = 5;
+    const m = h.text.match(/^(乃木|ノコル|新庄|チョッキー|東条|太田)：(.+)$/);
+    if (m) Voice.speak(m[1], m[2]);
+  }
 
   // --- 弾薬箱・鍵 ---
   for (const it of items) {
@@ -1288,6 +1376,11 @@ function updateLasers() {
   for (const l of lasers) {
     const t = elapsed + (l.phase || 0);
     l.active = l.type !== 'blink' || (t % l.period) < l.on;
+    // 点滅する線：切り替わる0.5秒前から予告（warn）
+    if (l.type === 'blink') {
+      const ph = t % l.period;
+      l.warn = l.active ? ph > l.on - 0.5 : ph > l.period - 0.5;
+    }
     if (l.type === 'move') {
       const s = Math.sin(t * l.speed);
       l.ox = l.move[0] * TILE * s; l.oy = l.move[1] * TILE * s;
@@ -1296,7 +1389,7 @@ function updateLasers() {
     if (l.high && player.crouch) continue;      // 高い位置の線は、ほふくでくぐれる
     const ax = l.a[0] * TILE + l.ox, ay = l.a[1] * TILE + l.oy, bx = l.b[0] * TILE + l.ox, by = l.b[1] * TILE + l.oy;
     if (squad.some(m => distToSeg(m.x, m.y, ax, ay, bx, by) < 8)) {
-      alertLevel = Math.min(100, alertLevel + LASER_PENALTY);
+      alertLevel = Math.min(100, alertLevel + (stage.laserPenalty || LASER_PENALTY));
       player.invuln = 1.5; flashTimer = 0.4;
       Sound.laser();
       say('赤外線に触れた！ 警報が鳴っている！');
@@ -1515,7 +1608,12 @@ function moveGuardTo(g, tx, ty, speed, dt) {
 }
 
 // 無線・ヒントをすぐに表示する
-function say(text) { hintText = text; hintTimer = 4.5; Sound.radio(); }
+// 「名前：せりふ」の形なら、その人の声で読み上げる
+function say(text) {
+  hintText = text; hintTimer = 4.5; Sound.radio();
+  const m = text.match(/^(乃木|ノコル|新庄|チョッキー|東条|太田)：(.+)$/);
+  if (m) Voice.speak(m[1], m[2]);
+}
 
 function gameOver(reason) {
   overReason = reason;
@@ -1726,13 +1824,15 @@ function drawLasers() {
     ctx.fillRect(ax - 5, ay - 5, 10, 10); ctx.fillRect(bx - 5, by - 5, 10, 10);
     const col = l.high ? '255,160,0' : '255,40,40';
     if (!l.active) {
-      ctx.strokeStyle = `rgba(${col},0.15)`; ctx.lineWidth = 1;
+      // つく直前はチカチカして知らせる
+      const blinkOn = l.warn && Math.floor(elapsed * 12) % 2 === 0;
+      ctx.strokeStyle = `rgba(${col},${blinkOn ? 0.6 : 0.15})`; ctx.lineWidth = blinkOn ? 2 : 1;
       ctx.setLineDash([4, 6]);
       ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
       ctx.setLineDash([]);
       continue;
     }
-    const flick = 0.7 + Math.sin(elapsed * 30 + ax) * 0.3;
+    const flick = l.warn ? (Math.floor(elapsed * 12) % 2 ? 1 : 0.3) : 0.7 + Math.sin(elapsed * 30 + ax) * 0.3;
     ctx.strokeStyle = `rgba(${col},${0.25 * flick})`; ctx.lineWidth = 9;
     ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
     ctx.strokeStyle = `rgba(${col},${flick})`; ctx.lineWidth = 2;
@@ -2213,7 +2313,7 @@ function render() {
       '拉致された別班員を救出し、ゴルバドから脱出せよ',
       '移動：矢印キー / 左下パッド　麻酔銃：SPACE / ACTION',
       'ほふく：C / ほふくボタン　ハッキング：H / ハックボタン',
-      '音のON/OFF：M / 🔊',
+      '音のON/OFF：M / 🔊　　声のON/OFF：V / 「声」ボタン',
     ], '#ffcf6a', 'ステージを選んで SPACE / タップ で開始');
     drawStageButtons();
     return;
