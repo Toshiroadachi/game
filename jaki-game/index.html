@@ -49,9 +49,27 @@
     touch-action: none;
   }
   #actBtn.on { background: rgba(220,80,60,0.7); }
+  #crouchBtn {
+    position: fixed; right: 132px; bottom: 24px;
+    width: 64px; height: 64px; border-radius: 50%;
+    background: rgba(80,120,220,0.35);
+    border: 2px solid rgba(158,195,255,0.6);
+    color: #fff; font-size: 13px; font-weight: bold;
+    display: flex; align-items: center; justify-content: center;
+    touch-action: none;
+  }
+  #crouchBtn.on { background: rgba(80,120,220,0.75); }
+  #soundBtn {
+    position: fixed; right: 10px; top: 84px;
+    width: 44px; height: 44px; border-radius: 50%;
+    background: rgba(0,0,0,0.55); border: 1px solid rgba(255,255,255,0.4);
+    color: #fff; font-size: 20px;
+    display: flex; align-items: center; justify-content: center;
+    touch-action: none;
+  }
   /* マウス操作のPCでは少し控えめに表示 */
   @media (hover: hover) and (pointer: fine) {
-    #pad, #actBtn { opacity: 0.45; }
+    #pad, #actBtn, #crouchBtn { opacity: 0.45; }
   }
 </style>
 </head>
@@ -59,6 +77,8 @@
 <canvas id="game"></canvas>
 <div id="pad"><div id="knob"></div></div>
 <div id="actBtn">ACTION</div>
+<div id="crouchBtn">ほふく</div>
+<div id="soundBtn">🔊</div>
 
 <script>
 'use strict';
@@ -71,13 +91,120 @@ const PLAYER_SPEED = 150;        // 通常の移動速度（px/秒）
 const CROUCH_SPEED = 70;         // ほふく時の移動速度
 const PLAYER_R = 12;             // プレイヤーの当たり判定の半径
 const GUARD_R = 13;              // 見張りの当たり判定の半径
-const VIEW_RANGE = 220;          // 見張りの視界の距離
+const VIEW_RANGE = 190;          // 見張りの視界の距離
 const VIEW_ANGLE = Math.PI / 2.6;// 見張りの視野角（全体）
 const CROUCH_RANGE_RATE = 0.6;   // ほふく中は見つかる距離が短くなる
-const STUN_TIME = 10;            // 気絶させた時間（秒）
+const STUN_TIME = 12;            // 麻酔で眠らせる時間（秒）
+const PLAYER_VIEW_RANGE = 190;   // プレイヤーの視界（麻酔銃の射程）
+const PLAYER_VIEW_ANGLE = Math.PI / 2.8; // プレイヤーの視野角
+const SHOT_COOLDOWN = 1.2;       // 麻酔銃を撃ってから次に撃てるまでの時間（秒）
+const CAUGHT_PENALTY = 25;       // 見張りに捕まった時に上がる警戒度
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
+
+/* =========================================================
+   効果音・BGM（Web Audio API で音を合成。音声ファイルは使わない）
+   ・スマホは画面に触れるまで音を出せないので、最初の操作で unlock() する
+   ========================================================= */
+const Sound = (() => {
+  let ac = null;          // AudioContext
+  let master = null;      // 全体の音量
+  let muted = false;
+  let bgmTimer = null;
+  let bgmStep = 0;
+  let tense = false;      // 見つかっている時はBGMを緊迫させる
+
+  function unlock() {
+    if (!ac) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      // iPhoneのマナーモードでも音が出るようにする（対応ブラウザのみ）
+      try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+      ac = new AC();
+      master = ac.createGain();
+      master.gain.value = muted ? 0 : 0.6;
+      master.connect(ac.destination);
+    }
+    if (ac.state === 'suspended') ac.resume();
+  }
+
+  // 単純な音（周波数 f1 から f2 へ変化）
+  function tone(f1, f2, dur, type = 'square', vol = 0.2, delay = 0) {
+    if (!ac) return;
+    const t = ac.currentTime + delay;
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f1, t);
+    if (f2 !== f1) o.frequency.exponentialRampToValueAtTime(f2, t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(master);
+    o.start(t); o.stop(t + dur + 0.02);
+  }
+
+  // ノイズ音（足音・発射音など）
+  function noise(dur, vol = 0.2, freq = 1000, delay = 0) {
+    if (!ac) return;
+    const t = ac.currentTime + delay;
+    const len = Math.floor(ac.sampleRate * dur);
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    const src = ac.createBufferSource(); src.buffer = buf;
+    const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = freq;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    src.connect(f); f.connect(g); g.connect(master);
+    src.start(t);
+  }
+
+  // BGM：低音のくり返し。見つかると速く・高くなる
+  const CALM  = [55, 0, 55, 0, 65.4, 0, 49, 0];
+  const ALERT = [110, 110, 130.8, 110, 146.8, 110, 130.8, 98];
+  function bgmTick() {
+    if (!ac || muted) return;
+    const seq = tense ? ALERT : CALM;
+    const f = seq[bgmStep % seq.length];
+    if (f) tone(f, f, tense ? 0.14 : 0.35, tense ? 'square' : 'triangle', tense ? 0.07 : 0.12);
+    // 4拍ごとに小さな「チッ」（緊張感）
+    if (bgmStep % 4 === 2) noise(0.03, tense ? 0.05 : 0.025, 6000);
+    bgmStep++;
+  }
+  function startBGM() {
+    stopBGM();
+    bgmStep = 0;
+    tense = false;
+    bgmTimer = setInterval(bgmTick, 250);
+  }
+  function stopBGM() { if (bgmTimer) clearInterval(bgmTimer); bgmTimer = null; }
+  function setTension(on) {
+    if (on === tense) return;
+    tense = on;
+    if (bgmTimer) { clearInterval(bgmTimer); bgmTimer = setInterval(bgmTick, on ? 150 : 250); }
+  }
+
+  function toggleMute() {
+    muted = !muted;
+    if (master) master.gain.value = muted ? 0 : 0.6;
+    const b = document.getElementById('soundBtn');
+    if (b) b.textContent = muted ? '🔇' : '🔊';
+  }
+
+  return {
+    unlock, startBGM, stopBGM, setTension, toggleMute,
+    step:    () => noise(0.05, 0.06, 300),                          // 足音
+    crouch:  () => tone(300, 200, 0.08, 'triangle', 0.15),          // ほふく切り替え
+    shot:    () => { noise(0.12, 0.25, 2500); tone(1200, 400, 0.1, 'sine', 0.1); }, // 麻酔銃「プシュッ」
+    hit:     () => tone(180, 60, 0.25, 'sine', 0.3),                // 命中して倒れる
+    suspect: () => tone(700, 900, 0.12, 'sine', 0.15),              // 「?」
+    alert:   () => { tone(880, 880, 0.12, 'square', 0.2); tone(1320, 1320, 0.25, 'square', 0.2, 0.12); }, // 「!」
+    caught:  () => { noise(0.2, 0.3, 400); tone(200, 80, 0.3, 'sawtooth', 0.2); },
+    clear:   () => [523, 659, 784, 1047].forEach((f, i) => tone(f, f, 0.25, 'square', 0.15, i * 0.15)),
+    gameOver:() => [392, 330, 262, 196].forEach((f, i) => tone(f, f * 0.97, 0.35, 'sawtooth', 0.15, i * 0.25)),
+  };
+})();
 
 /* =========================================================
    ステージデータ
@@ -116,9 +243,9 @@ const STAGES = [
     ],
     // ヒント（その範囲に入ると画面下に表示）
     hints: [
-      { area: [0,0,9,25],  text: '矢印キー（スマホは左下のパッド）で移動。右端の城門をめざせ。' },
-      { area: [9,0,9,25],  text: '黄色い扇形が見張りの視界。岩は視線をさえぎる。SPACEでほふく → 見つかりにくく、草むらに隠れられる。' },
-      { area: [18,0,10,25],text: '見張りの背後に近づいて SPACE で気絶させられる（約10秒）。' },
+      { area: [0,0,9,25],  text: '矢印キー（スマホは左下のパッド）で移動。右端の城門をめざせ。青い扇形があなたの視界。' },
+      { area: [9,0,9,25],  text: '黄色い扇形が見張りの視界。入ると「?」→ ゲージが満タンで「!」発見。C／ほふくボタンで低い姿勢になると見つかりにくく、草むらに隠れられる。' },
+      { area: [18,0,10,25],text: '自分の視界（青）に見張りが入ると照準が出る。SPACE／ACTIONで麻酔銃 → 12秒眠らせる。' },
       { area: [28,0,8,25], text: '警戒度が100%でゲームオーバー。光っている城門に入ればクリア！' },
     ],
     intro: '人質が囚われているジャキ城へ潜入せよ。まずは城外の荒野を抜け、城門へ向かえ。',
@@ -141,6 +268,8 @@ let overReason = '';
 let introTimer = 0;
 let staticLayer = null;   // 地面・岩・壁を事前描画した画像
 let bushLayer = null;     // 草むらを事前描画した画像
+let shots = [];           // 麻酔銃の弾道エフェクト
+let flashTimer = 0;       // 捕まった時に画面を赤く光らせる時間
 
 /* =========================================================
    入力（キーボード＋タッチ）
@@ -154,7 +283,10 @@ window.addEventListener('keydown', e => {
   }
   if (e.repeat) return;
   keys[e.code] = true;
+  Sound.unlock();
   if (e.code === 'Space' || e.code === 'Enter') onAction();
+  if (e.code === 'KeyC' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') toggleCrouch();
+  if (e.code === 'KeyM') Sound.toggleMute();
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
 
@@ -188,9 +320,18 @@ pad.addEventListener('pointercancel', padEnd);
 
 // --- アクションボタン ---
 const actBtn = document.getElementById('actBtn');
-actBtn.addEventListener('pointerdown', e => { e.preventDefault(); actBtn.classList.add('on'); onAction(); });
+actBtn.addEventListener('pointerdown', e => { e.preventDefault(); Sound.unlock(); actBtn.classList.add('on'); onAction(); });
 actBtn.addEventListener('pointerup', () => actBtn.classList.remove('on'));
 actBtn.addEventListener('pointercancel', () => actBtn.classList.remove('on'));
+// --- ほふくボタン ---
+const crouchBtn = document.getElementById('crouchBtn');
+crouchBtn.addEventListener('pointerdown', e => { e.preventDefault(); Sound.unlock(); toggleCrouch(); });
+// --- 音のON/OFFボタン ---
+const soundBtn = document.getElementById('soundBtn');
+soundBtn.addEventListener('pointerdown', e => { e.preventDefault(); Sound.unlock(); Sound.toggleMute(); });
+// どこかに触れた最初のタイミングで音を使えるようにする（スマホは操作がないと音が出せないため）
+window.addEventListener('pointerdown', () => Sound.unlock(), true);
+window.addEventListener('touchend', () => Sound.unlock(), true);
 // タイトル画面などでは画面タップでも開始できる
 canvas.addEventListener('pointerdown', () => { if (scene !== 'play') onAction(); });
 
@@ -214,15 +355,31 @@ function onAction() {
   if (scene === 'clear') { scene = 'title'; return; }
   if (scene !== 'play') return;
 
-  // 背後から気絶させられる見張りがいれば気絶、いなければ「ほふく」切り替え
-  const target = findStunTarget();
+  // 麻酔銃：自分の視界の中にいる見張りを眠らせる
+  if (player.cooldown > 0) return;
+  player.cooldown = SHOT_COOLDOWN;
+  const target = findShotTarget();
   if (target) {
     target.state = 'stun';
     target.stunTimer = STUN_TIME;
     target.susp = 0;
+    shots.push({ x1: player.x, y1: player.y, x2: target.x, y2: target.y, t: 0.25 });
+    Sound.shot(); setTimeout(() => Sound.hit(), 120);
   } else {
-    player.crouch = !player.crouch;
+    // 視界に敵がいない時は空撃ち（前方へ弾が飛ぶだけ）
+    shots.push({ x1: player.x, y1: player.y,
+      x2: player.x + Math.cos(player.dir) * PLAYER_VIEW_RANGE,
+      y2: player.y + Math.sin(player.dir) * PLAYER_VIEW_RANGE, t: 0.25 });
+    Sound.shot();
   }
+}
+
+// ほふく（低い姿勢）の切り替え
+function toggleCrouch() {
+  if (scene !== 'play') return;
+  player.crouch = !player.crouch;
+  crouchBtn.classList.toggle('on', player.crouch);
+  Sound.crouch();
 }
 
 /* =========================================================
@@ -258,7 +415,13 @@ function startStage(index) {
   player = {
     x: (stage.start[0] + 0.5) * TILE, y: (stage.start[1] + 0.5) * TILE,
     dir: 0, crouch: false, walk: 0,
+    cooldown: 0,      // 麻酔銃の再使用までの時間
+    invuln: 0,        // 捕まった直後の無敵時間
+    stepTimer: 0,     // 足音の間隔
   };
+  crouchBtn.classList.remove('on');
+  shots = [];
+  flashTimer = 0;
 
   // 見張り
   guards = stage.guards.map(g => {
@@ -275,6 +438,7 @@ function startStage(index) {
       seen: false,         // 今プレイヤーが見えているか
       lastX: 0, lastY: 0,  // 最後にプレイヤーを見た位置
       lostTimer: 0, searchTimer: 0, stunTimer: 0,
+      pause: 0,            // 捕まえた直後に立ち止まる時間（その間に逃げられる）
       phase: Math.random() * 6,
     };
   });
@@ -285,6 +449,7 @@ function startStage(index) {
   buildLayers();
   resize();
   scene = 'play';
+  Sound.startBGM();
 }
 
 /* =========================================================
@@ -363,16 +528,20 @@ function guardCanSee(g) {
   return lineOfSight(g.x, g.y, player.x, player.y);
 }
 
-// 背後から気絶させられる見張りを探す
-function findStunTarget() {
+// プレイヤーの視界の中にいる見張り（麻酔銃で狙える相手）を探す。一番近い相手を返す
+function findShotTarget() {
+  let best = null, bestD = Infinity;
   for (const g of guards) {
-    if (g.state === 'stun' || g.state === 'alert') continue;
-    const dx = player.x - g.x, dy = player.y - g.y;
-    if (Math.hypot(dx, dy) > 40) continue;
-    // 見張りの向きと、見張り→プレイヤー方向の差が大きい＝背後
-    if (Math.abs(angleDiff(Math.atan2(dy, dx), g.dir)) > Math.PI * 0.55) return g;
+    if (g.state === 'stun') continue;
+    const dx = g.x - player.x, dy = g.y - player.y;
+    const d = Math.hypot(dx, dy);
+    if (d > PLAYER_VIEW_RANGE || d >= bestD) continue;
+    // すぐ近くなら向きに関係なく狙える
+    if (d > 35 && Math.abs(angleDiff(Math.atan2(dy, dx), player.dir)) > PLAYER_VIEW_ANGLE / 2) continue;
+    if (!lineOfSight(player.x, player.y, g.x, g.y)) continue;
+    best = g; bestD = d;
   }
-  return null;
+  return best;
 }
 
 /* =========================================================
@@ -382,6 +551,11 @@ function update(dt) {
   if (scene !== 'play') return;
   elapsed += dt;
   if (introTimer > 0) introTimer -= dt;
+  if (player.cooldown > 0) player.cooldown -= dt;
+  if (player.invuln > 0) player.invuln -= dt;
+  if (flashTimer > 0) flashTimer -= dt;
+  shots.forEach(s => s.t -= dt);
+  shots = shots.filter(s => s.t > 0);
 
   // --- プレイヤーの移動 ---
   const mv = getMoveVec();
@@ -390,6 +564,9 @@ function update(dt) {
     player.dir = Math.atan2(mv.y, mv.x);
     player.walk += dt * (player.crouch ? 6 : 12);
     moveWithCollision(player, mv.x * speed * dt, mv.y * speed * dt, PLAYER_R);
+    // 足音（ほふく中は鳴らない）
+    player.stepTimer -= dt;
+    if (!player.crouch && player.stepTimer <= 0) { Sound.step(); player.stepTimer = 0.32; }
   }
 
   // --- 見張りの行動 ---
@@ -397,16 +574,23 @@ function update(dt) {
   for (const g of guards) {
     updateGuard(g, dt);
     if (g.state === 'alert') anyAlert = true;
-    // 警戒中の見張りに捕まったら即ゲームオーバー
-    if (g.state === 'alert' && Math.hypot(player.x - g.x, player.y - g.y) < PLAYER_R + GUARD_R) {
-      gameOver('見張りに捕まった！');
-      return;
+    // 警戒中の見張りに捕まると警戒度が大きく上がり、少し突き飛ばされる（即終了ではない）
+    if (g.state === 'alert' && player.invuln <= 0 &&
+        Math.hypot(player.x - g.x, player.y - g.y) < PLAYER_R + GUARD_R) {
+      alertLevel = Math.min(100, alertLevel + CAUGHT_PENALTY);
+      player.invuln = 1.5;
+      g.pause = 1.5;
+      flashTimer = 0.4;
+      const a = Math.atan2(player.y - g.y, player.x - g.x);
+      moveWithCollision(player, Math.cos(a) * 40, Math.sin(a) * 40, PLAYER_R);
+      Sound.caught();
     }
   }
+  Sound.setTension(anyAlert);
 
   // --- 警戒度 ---
   // 見つかっていない間はゆっくり下がる
-  if (!anyAlert) alertLevel = Math.max(0, alertLevel - 4 * dt);
+  if (!anyAlert) alertLevel = Math.max(0, alertLevel - 6 * dt);
   if (alertLevel >= 100) { gameOver('警戒度が最大になった！'); return; }
 
   // --- ゴール判定 ---
@@ -414,16 +598,19 @@ function update(dt) {
   if (player.x > gx * TILE && player.x < (gx + gw) * TILE &&
       player.y > gy * TILE && player.y < (gy + gh) * TILE) {
     scene = 'clear';
+    Sound.stopBGM();
+    Sound.clear();
   }
 }
 
 function updateGuard(g, dt) {
-  const PATROL_SPEED = 55, CHASE_SPEED = 125;
+  const PATROL_SPEED = 55, CHASE_SPEED = 105;
 
   // 気絶中
   if (g.state === 'stun') {
     g.stunTimer -= dt;
     if (g.stunTimer <= 0) { g.state = 'return'; }
+    g.seen = false;
     return;
   }
 
@@ -432,13 +619,15 @@ function updateGuard(g, dt) {
   if (g.seen) { g.lastX = player.x; g.lastY = player.y; }
 
   if (g.state === 'alert') {
+    // 捕まえた直後は少し立ち止まる
+    if (g.pause > 0) { g.pause -= dt; return; }
     // --- 警戒状態：プレイヤーを追いかける ---
     if (g.seen) {
       g.lostTimer = 0;
-      alertLevel = Math.min(100, alertLevel + 22 * dt);
+      alertLevel = Math.min(100, alertLevel + 12 * dt);
     } else {
       g.lostTimer += dt;
-      if (g.lostTimer > 3) { g.state = 'search'; g.searchTimer = 3; g.susp = 0.5; }
+      if (g.lostTimer > 2.5) { g.state = 'search'; g.searchTimer = 3; g.susp = 0.2; }
     }
     moveGuardTo(g, g.lastX, g.lastY, CHASE_SPEED, dt);
     return;
@@ -447,17 +636,20 @@ function updateGuard(g, dt) {
   // --- 怪しさの増減 ---
   if (g.seen) {
     const dist = Math.hypot(player.x - g.x, player.y - g.y);
-    // 近いほど早く気づく
-    g.susp += dt * (0.5 + 2.2 * (1 - dist / VIEW_RANGE));
+    // 近いほど早く気づく（遠くなら2秒以上かかるので、気づかれかけても逃げられる）
+    const before = g.susp;
+    g.susp += dt * (0.3 + 1.3 * Math.max(0, 1 - dist / VIEW_RANGE));
+    if (before < 0.05 && g.susp >= 0.05) Sound.suspect();
     if (g.susp >= 1) {
       g.susp = 1;
       g.state = 'alert';
       g.lostTimer = 0;
-      alertLevel = Math.min(100, alertLevel + 30);  // 発見された瞬間に大きく上がる
+      alertLevel = Math.min(100, alertLevel + 20);  // 発見された瞬間に上がる
+      Sound.alert();
       return;
     }
   } else {
-    g.susp = Math.max(0, g.susp - dt * 0.35);
+    g.susp = Math.max(0, g.susp - dt * 0.4);
   }
 
   // 少し怪しいと思ったら立ち止まってその方向を見る
@@ -522,6 +714,8 @@ function moveGuardTo(g, tx, ty, speed, dt) {
 function gameOver(reason) {
   overReason = reason;
   scene = 'over';
+  Sound.stopBGM();
+  Sound.gameOver();
 }
 
 /* =========================================================
@@ -652,6 +846,50 @@ function drawVision(g) {
   ctx.fill();
 }
 
+// プレイヤーの視界（青い扇形）
+function drawPlayerVision() {
+  const RAYS = 24, p = player;
+  ctx.beginPath();
+  ctx.moveTo(p.x, p.y);
+  for (let i = 0; i <= RAYS; i++) {
+    const a = p.dir - PLAYER_VIEW_ANGLE / 2 + PLAYER_VIEW_ANGLE * i / RAYS;
+    const cos = Math.cos(a), sin = Math.sin(a);
+    let d = 0;
+    while (d < PLAYER_VIEW_RANGE) {
+      if (solidAt(p.x + cos * d, p.y + sin * d)) break;
+      d += 6;
+    }
+    ctx.lineTo(p.x + cos * d, p.y + sin * d);
+  }
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(70,140,255,0.24)';
+  ctx.fill();
+}
+
+// 狙える見張りに照準マークを表示
+function drawReticle(g) {
+  const ready = player.cooldown <= 0;
+  const r = 20 + Math.sin(elapsed * 8) * 2;
+  ctx.strokeStyle = ready ? '#ff4040' : 'rgba(255,64,64,0.4)';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(g.x, g.y, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(g.x - r - 6, g.y); ctx.lineTo(g.x - r + 6, g.y);
+  ctx.moveTo(g.x + r - 6, g.y); ctx.lineTo(g.x + r + 6, g.y);
+  ctx.moveTo(g.x, g.y - r - 6); ctx.lineTo(g.x, g.y - r + 6);
+  ctx.moveTo(g.x, g.y + r - 6); ctx.lineTo(g.x, g.y + r + 6);
+  ctx.stroke();
+}
+
+// 麻酔銃の弾道
+function drawShots() {
+  for (const s of shots) {
+    ctx.strokeStyle = `rgba(200,255,255,${s.t * 4})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke();
+  }
+}
+
 function drawGuard(g) {
   ctx.save();
   ctx.translate(g.x, g.y);
@@ -694,6 +932,7 @@ function drawGuard(g) {
 
 function drawPlayer() {
   const p = player;
+  if (p.invuln > 0 && Math.floor(p.invuln * 10) % 2 === 0) return;  // 点滅
   ctx.save();
   ctx.translate(p.x, p.y);
   ctx.fillStyle = 'rgba(0,0,0,0.25)';
@@ -763,12 +1002,18 @@ function drawHUD() {
   ctx.fillStyle = player.crouch ? '#9ec3ff' : '#fff';
   ctx.fillText(status, sx + 10, sy + 19);
 
-  // 気絶させられる時の案内
-  if (findStunTarget()) {
-    ctx.fillStyle = 'rgba(200,40,40,0.8)';
+  // 狙える見張りがいる時の案内
+  if (findShotTarget()) {
+    ctx.fillStyle = player.cooldown > 0 ? 'rgba(120,40,40,0.8)' : 'rgba(200,40,40,0.8)';
     ctx.fillRect(sx, sy + 34, 180, 28);
     ctx.fillStyle = '#fff';
-    ctx.fillText('ACTION：気絶させる', sx + 10, sy + 53);
+    ctx.fillText(player.cooldown > 0 ? '装填中…' : 'ACTION：麻酔銃', sx + 10, sy + 53);
+  }
+
+  // 捕まった時は画面全体を赤く光らせる
+  if (flashTimer > 0) {
+    ctx.fillStyle = `rgba(255,0,0,${flashTimer * 0.8})`;
+    ctx.fillRect(0, 0, W, H);
   }
 
   // 見つかった時は画面のふちを赤く
@@ -786,7 +1031,7 @@ function drawHUD() {
                                     ty >= h.area[1] && ty < h.area[1] + h.area[3]);
     if (h) hint = h.text;
   }
-  if (hint) drawTextBox(hint, W / 2, narrow ? 144 : 84, Math.min(W - 20, 560));
+  if (hint) drawTextBox(hint, W / 2, narrow ? 144 : 84, Math.min(W - (narrow ? 20 : 120), 560));
 }
 
 // 折り返し付きのメッセージボックス
@@ -856,8 +1101,9 @@ function render() {
     drawTitleBG();
     drawScreen('潜入作戦 ジャキ城奪還', '― ドラマ「VIVANT」モチーフのファンメイド潜入アクション ―', [
       '見張りの視界（黄色い扇形）を避けて進め',
-      '移動：矢印キー / 左下パッド　アクション：SPACE / ACTIONボタン',
-      'アクション＝ほふく切り替え・背後から気絶',
+      '移動：矢印キー / 左下パッド',
+      '麻酔銃：SPACE / ACTION（自分の視界＝青い扇形の中の敵を眠らせる）',
+      'ほふく：C / ほふくボタン　　音のON/OFF：M / 🔊',
     ], '#ffcf6a');
     return;
   }
@@ -871,9 +1117,13 @@ function render() {
 
   ctx.drawImage(staticLayer, 0, 0);
   drawGoal();
+  drawPlayerVision();
   guards.forEach(drawVision);
   drawPlayer();
   guards.forEach(drawGuard);
+  const target = scene === 'play' ? findShotTarget() : null;
+  if (target) drawReticle(target);
+  drawShots();
   // 草むらはプレイヤーの上に半透明で重ねる（隠れている感じを出す）
   ctx.globalAlpha = 0.8;
   ctx.drawImage(bushLayer, 0, 0);
