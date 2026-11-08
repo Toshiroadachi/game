@@ -224,6 +224,9 @@ const Sound = (() => {
     { bass: [N.C3,0,0,0, 0,0,0,0, N.Db3,0,0,0, 0,0,0,0],                 // 3：赤外線（息をひそめる）
       lead: [N.C5,0,0,0, 0,0,0,0, 0,0,N.Db5,0, 0,0,0,0], drone: N.C3, stepDur: 0.15, tickAll: true },
   ];
+  THEMES.push({ // 4：空港（速めで、最後の決戦）
+    bass: [N.G2,0,N.G2,0, N.Ab2,0,N.G2,0, N.G2,0,N.Bb2,0, N.Ab2,0,N.G2,0],
+    lead: [N.D5,0,0,0, N.Eb5,0,0,0, N.D5,0,0,N.C5, 0,0,N.Bb4,0], drone: N.G2, stepDur: 0.16 });
   // 警戒中：速いベースと、半音で上下するサイレンのようなメロディ
   const ALERT_BASS = [N.A2,N.A3,N.A2,N.A3, N.A2,N.A3,N.Bb2,N.Bb3, N.A2,N.A3,N.A2,N.A3, N.Ab2,N.Ab2,N.Bb2,N.Bb2];
   const ALERT_LEAD = [N.E5,N.F5,N.E5,N.F5, N.E5,N.F5,N.E5,N.F5, N.Eb5,N.E5,N.Eb5,N.E5, N.F5,0,N.F5,0];
@@ -447,10 +450,8 @@ const Voice = (() => {
    [話す人, せりふ]
    ========================================================= */
 const ENDING = [
-  ['東条', 'C地点、命中！……だが、敵の本部にはもう連絡が行っている。'],
-  ['ナレーション', '追撃の中、乃木の別人格「F」が、和田の仇である李を倒した。ノコルもFの存在を知ることになる。'],
-  ['ナレーション', '空港ではシンシーの周が立ちはだかる。そこへチンギスが助けに入った。'],
-  ['ナレーション', '一行はプライベートジェットで、ゴルバドからの脱出に成功した。'],
+  ['ナレーション', 'チンギスの助けで周を退け、一行はプライベートジェットに乗り込んだ。'],
+  ['ナレーション', 'ジェットは滑走路を離れ、ゴルバドからの脱出に成功した。'],
   ['乃木', '……和田さん。一緒に、帰りましょう。'],
 ];
 
@@ -754,7 +755,71 @@ const STAGES = [
       ['太田', '敵のバイクに注意して。通信可能エリアに入られたら、本部に作戦が伝わる！'],
       ['乃木', '全員で車列まで走れ！'],
     ],
+    after: [
+      ['東条', 'C地点、命中！……だが、敵のバイクから本部にはもう連絡が行っている。'],
+      ['ナレーション', '追撃の中、乃木の別人格「F」が、和田の仇である李を倒した。ノコルもFの存在を知ることになる。'],
+      ['乃木', '空港へ向かう。プライベートジェットが待っている。'],
+    ],
     clearText: 'シャキ城からの脱出に成功した',
+  },
+  {
+    name: 'STAGE 6  空港',
+    theme: 'airport', music: 4,
+    cols: 48, rows: 22,
+    team: [...TEAM10, 'rescued', 'rescued', 'rescued', 'rescued'],
+    start: [3, 18],
+    goal: [42, 9, 4, 4], goalLabel: 'ジェット',
+    needBoss: true,                  // 周を倒さないとジェットに乗れない
+    timeLimit: 150,                  // 離陸までの制限時間（秒）
+    ammo: 3, hacks: 1, hackTime: 6,
+    ammoItems: [[20.5, 9.5], [31.5, 12.5]],
+    // コンテナ（通れない・視線をさえぎる）
+    rocks: [
+      [8,10,2,1],[8,14,1,2],[12,12,2,1],[24,8,1,2],[24,14,1,2],
+      [28,4,2,1],[28,17,2,1],[33,7,1,2],[33,13,1,2],
+    ],
+    walls: [
+      [2,1,10,5],          // ターミナル
+      [16,1,6,6],          // 格納庫A
+      [16,15,6,6],         // 格納庫B
+    ],
+    bushes: [],
+    labels: [
+      { x: 7, y: 3.8, text: 'ターミナル' }, { x: 19, y: 4.3, text: '格納庫A' }, { x: 19, y: 18.3, text: '格納庫B' },
+    ],
+    // 合図地点：ここに着くとチンギスが助けに来る
+    signal: { rect: [26, 10, 2, 2], label: '合図地点' },
+    allies: { spawn: [[25.5,20.3],[27.5,20.3],[29.5,20.3],[31.5,20.3]] },
+    guards: [
+      { type: 'patrol', waypoints: [[13.5,8.5],[13.5,19.5]] },
+      { type: 'patrol', waypoints: [[23.5,3.5],[31.5,3.5]] },
+      { type: 'patrol', waypoints: [[31.5,19.5],[23.5,19.5]] },
+      { type: 'turn', pos: [22.5,11.5], center: Math.PI, amp: 1.0 },
+      { type: 'patrol', waypoints: [[38.5,4.5],[38.5,18.5]] },
+      { type: 'turn', pos: [36.5,10.5], center: Math.PI, amp: 0.8 },
+      { type: 'camera', pos: [11.5,6.6], center: Math.PI / 2, amp: 0.9 },
+      { type: 'camera', pos: [22.6,14.4], center: Math.PI * 0.85, amp: 0.7 },
+      // 周（シンシー）：ジェットの前に立ちはだかる。麻酔は2発必要
+      { type: 'boss', pos: [40.5,11], center: Math.PI, amp: 0.5 },
+    ],
+    searchlights: [
+      { path: [[30,6],[30,16]], speed: 75, r: 55 },
+      { path: [[35.5,3],[35.5,19]], speed: 90, r: 50 },
+    ],
+    hints: [
+      { area: [0,0,12,22],  text: '太田：空港に着いた。まずは真ん中の「合図地点」へ。チンギスたちが待機してる！' },
+      { area: [12,0,12,22], text: '投光器（白い光）とカメラに注意。制限時間内にジェットまでたどり着け。' },
+      { area: [34,0,14,22], text: 'ジェットの前に周がいる。麻酔は2発必要。チンギスたちに押さえてもらうこともできる。' },
+    ],
+    intro: '目標：合図地点へ → 周を倒してジェットへ（制限時間あり）',
+    story: [
+      ['乃木', '空港に着いた。プライベートジェットは滑走路の奥だ。'],
+      ['太田', '空港の監視カメラは1回だけハックできる。……待って、ジェットの前に周がいる！'],
+      ['新庄', 'シンシーの周か……。一筋縄ではいかないぞ。'],
+      ['ノコル', 'チンギスに連絡してある。合図があれば、すぐに駆けつける。'],
+      ['乃木', 'まずは合図地点へ。離陸の時間まで、もうあまりない。'],
+    ],
+    clearText: 'プライベートジェットに乗り込んだ！',
   },
 ];
 
@@ -781,6 +846,9 @@ let blackoutTimer = 0;    // 停電の残り時間
 let blackoutPhase = 0;    // 停電中の会話の進み具合
 let chase = null;         // 追っ手の出現管理
 let bike = null;          // 敵のバイク
+let timeLeft = 0;         // 制限時間の残り
+let signalDone = false;   // 合図地点に着いたか
+let boss = null;          // 周
 let alertLevel = 0;
 let elapsed = 0;
 let overReason = '';
@@ -943,9 +1011,20 @@ function onAction() {
   player.cooldown = SHOT_COOLDOWN;
   player.ammo--;
   const target = findShotTarget();
+  if (target && target.type === 'boss' && target.hp > 1) {
+    // 周は1発では倒れない。こちらに気づいて向かってくる
+    target.hp--;
+    target.state = 'alert'; target.susp = 1; target.lostTimer = 0;
+    target.lastX = player.x; target.lastY = player.y;
+    shots.push({ x1: player.x, y1: player.y, x2: target.x, y2: target.y, t: 0.25 });
+    Sound.shot(); setTimeout(() => Sound.hit(), 120);
+    say('周：……この程度の麻酔で、私が倒れるとでも？');
+    return;
+  }
   if (target) {
     target.state = 'stun';
-    target.stunTimer = target.type === 'bike' ? 9999 : STUN_TIME;
+    target.stunTimer = target.type === 'bike' || target.type === 'boss' ? 9999 : STUN_TIME;
+    if (target.type === 'boss') { target.hp = 0; say('乃木：周を眠らせた。今のうちにジェットへ！'); }
     target.susp = 0;
     shots.push({ x1: player.x, y1: player.y, x2: target.x, y2: target.y, t: 0.25 });
     Sound.shot(); setTimeout(() => Sound.hit(), 120);
@@ -1031,6 +1110,10 @@ function startStage(index) {
   bombs = (stage.bombs || []).map(b => ({ ...b, x: b.at[0] * TILE, y: b.at[1] * TILE, armed: false, done: false }));
   chase = stage.chase ? { ...stage.chase, timer: stage.chase.first, spawned: 0 } : null;
   bike = null;
+  timeLeft = stage.timeLimit || 0;
+  signalDone = false;
+  boss = guards.find(g => g.type === 'boss') || null;
+  if (boss) boss.hp = 2;
 
   items = (stage.ammoItems || []).map(([x, y]) => ({ x: x * TILE, y: y * TILE, taken: false, kind: 'ammo' }));
   if (stage.key) items.push({ x: stage.key[0] * TILE, y: stage.key[1] * TILE, taken: false, kind: 'key' });
@@ -1186,7 +1269,7 @@ function updateSquad() {
    見張り・カメラがプレイヤーを見ているか
    ========================================================= */
 function guardCanSee(g) {
-  if (g.state === 'stun' || g.type === 'bike' || g.type === 'chaser') return null;
+  if (g.state === 'stun' || g.type === 'bike' || g.type === 'chaser' || g.type === 'ally') return null;
   if (g.type === 'camera' && hackTimer > 0) return null;
   let best = null, bestD = Infinity;
   for (const m of squad) {
@@ -1199,6 +1282,7 @@ function viewRange(g) {
   let r = g.type === 'camera' ? CAMERA_RANGE : VIEW_RANGE;
   if (g.state === 'alert') r *= 1.2;
   if (blackoutTimer > 0 && g.type !== 'camera') r *= 0.5;   // 停電中は見えにくい
+  if (g.type === 'boss') r *= 1.15;                          // 周はよく見ている
   return r;
 }
 function guardCanSeeMember(g, m) {
@@ -1214,7 +1298,7 @@ function guardCanSeeMember(g, m) {
 function findShotTarget() {
   let best = null, bestD = Infinity;
   for (const g of guards) {
-    if (g.state === 'stun' || g.type === 'camera') continue;
+    if (g.state === 'stun' || g.type === 'camera' || g.type === 'ally') continue;
     const dx = g.x - player.x, dy = g.y - player.y;
     const d = Math.hypot(dx, dy);
     if (d > PLAYER_VIEW_RANGE || d >= bestD) continue;
@@ -1235,7 +1319,7 @@ function raiseAlarm(x, y) {
   alertLevel = Math.min(100, alertLevel + 20);
   Sound.siren();
   for (const g of guards) {
-    if (g.state === 'stun' || g.type === 'camera' || g.type === 'bike') continue;
+    if (g.state === 'stun' || g.type === 'camera' || g.type === 'bike' || g.type === 'ally') continue;
     if (Math.hypot(g.x - x, g.y - y) > 500) continue;
     g.state = 'alert'; g.susp = 1; g.lostTimer = 0;
     g.lastX = x; g.lastY = y;
@@ -1317,6 +1401,28 @@ function update(dt) {
   // --- 追っ手とバイク（脱出ステージ） ---
   updateChase(dt);
 
+  // --- 制限時間（空港） ---
+  if (stage.timeLimit) {
+    timeLeft -= dt;
+    if (timeLeft <= 0) { gameOver('時間切れ：ジェットが離陸できなくなった……'); return; }
+  }
+
+  // --- 合図地点：着くとチンギスたちが助けに来る ---
+  if (stage.signal && !signalDone) {
+    const [sx, sy, sw, sh] = stage.signal.rect;
+    if (player.x > sx * TILE && player.x < (sx + sw) * TILE && player.y > sy * TILE && player.y < (sy + sh) * TILE) {
+      signalDone = true;
+      stage.allies.spawn.forEach((p, i) => {
+        const a = makeGuard({ type: 'ally', pos: p });
+        a.state = 'ally';
+        if (i === 0) a.name = 'チンギス';
+        guards.push(a);
+      });
+      Sound.rescue();
+      say('チンギス：待たせたな！ シンシーの連中は俺たちが押さえる。行け、乃木！');
+    }
+  }
+
   // --- 見張り ---
   let anyAlert = false;
   for (const g of guards) {
@@ -1345,7 +1451,7 @@ function update(dt) {
   // --- 心臓の鼓動：見張りが近い・怪しまれているほど速く大きく ---
   let danger = 0;
   for (const g of guards) {
-    if (g.state === 'stun' || g.type === 'camera') continue;
+    if (g.state === 'stun' || g.type === 'camera' || g.type === 'ally') continue;
     let near = Infinity;
     for (const m of squad) near = Math.min(near, Math.hypot(m.x - g.x, m.y - g.y));
     danger = Math.max(danger, 1 - near / 260, g.susp, g.state === 'alert' ? 1 : 0);
@@ -1365,7 +1471,7 @@ function update(dt) {
 
   // --- ゴール判定 ---
   const [gx, gy, gw, gh] = stage.goal;
-  const goalOpen = !stage.needRescue || prisoners.every(p => p.joined);
+  const goalOpen = goalUnlocked();
   if (goalOpen && player.x > gx * TILE && player.x < (gx + gw) * TILE &&
       player.y > gy * TILE && player.y < (gy + gh) * TILE) {
     scene = 'clear';
@@ -1373,6 +1479,13 @@ function update(dt) {
     Sound.stopBGM();
     Sound.clear();
   }
+}
+
+// ゴールに入れるか（仲間の救出・周の制圧が必要なステージがある）
+function goalUnlocked() {
+  if (stage.needRescue && !prisoners.every(p => p.joined)) return false;
+  if (stage.needBoss && boss && boss.state !== 'stun') return false;
+  return true;
 }
 
 // 停電：鍵を取ると起きる。時間がたつと復旧
@@ -1525,6 +1638,25 @@ function updateGuard(g, dt) {
     return;
   }
 
+  // --- 味方（チンギスたち）：一番近い敵に向かい、触れたら制圧する ---
+  if (g.type === 'ally') {
+    let best = null, bd = Infinity;
+    for (const e of guards) {
+      if (e.type === 'ally' || e.type === 'camera' || e.state === 'stun') continue;
+      const d = Math.hypot(e.x - g.x, e.y - g.y);
+      if (d < bd) { bd = d; best = e; }
+    }
+    if (!best) return;
+    if (bd < 26) {
+      best.state = 'stun'; best.stunTimer = 9999; best.subdued = true;
+      Sound.hit();
+      if (best.type === 'boss') say('チンギス：周は押さえた！ 乃木、ジェットへ急げ！');
+      return;
+    }
+    moveGuardTo(g, best.x, best.y, 125, dt);
+    return;
+  }
+
   // --- 敵のバイク：ルートを走り、終点（通信可能エリア）に着くと本部に知られる ---
   if (g.type === 'bike') {
     if (g.done) return;
@@ -1614,7 +1746,7 @@ function updateGuard(g, dt) {
     if (moveGuardTo(g, tx, ty, PATROL_SPEED * 1.2, dt)) g.state = 'patrol';
     return;
   }
-  if (g.type === 'turn') {
+  if (g.type === 'turn' || g.type === 'boss') {
     g.phase += dt * 0.8;
     turnToward(g, g.center + Math.sin(g.phase) * g.amp, 2, dt);
     return;
@@ -1687,7 +1819,21 @@ function buildLayers() {
   staticLayer.width = W; staticLayer.height = H;
   const c = staticLayer.getContext('2d');
 
-  if (th === 'desert') {
+  if (th === 'airport') {
+    // アスファルト
+    c.fillStyle = '#4a4d52';
+    c.fillRect(0, 0, W, H);
+    for (let i = 0; i < W * H / 500; i++) {
+      c.fillStyle = rnd() < 0.5 ? 'rgba(0,0,0,0.12)' : 'rgba(255,255,255,0.05)';
+      c.fillRect(rnd() * W, rnd() * H, 2, 2);
+    }
+    // 滑走路の白線と誘導路の黄色い線
+    c.fillStyle = 'rgba(255,255,255,0.7)';
+    for (let x = 35 * TILE; x < W; x += 60) c.fillRect(x, 11 * TILE - 3, 34, 6);
+    c.strokeStyle = 'rgba(255,210,60,0.6)'; c.lineWidth = 4;
+    c.beginPath(); c.moveTo(0, 18.5 * TILE); c.lineTo(10 * TILE, 18.5 * TILE);
+    c.quadraticCurveTo(14 * TILE, 18.5 * TILE, 14 * TILE, 11 * TILE); c.lineTo(42 * TILE, 11 * TILE); c.stroke();
+  } else if (th === 'desert') {
     c.fillStyle = '#b89a6a';
     c.fillRect(0, 0, W, H);
     for (let i = 0; i < W * H / 640; i++) {
@@ -1729,11 +1875,17 @@ function buildLayers() {
     c.fillRect(x * TILE, y * TILE, w * TILE, h * TILE);
   });
 
-  const wallColor = th === 'dungeon' ? ['#4b4750', '#2f2c33'] : th === 'lab' ? ['#454b55', '#2c3038'] : ['#7d7d86', '#5a5a63'];
+  const wallColor = th === 'airport' ? ['#9aa0a8', '#7a8088'] : th === 'dungeon' ? ['#4b4750', '#2f2c33'] : th === 'lab' ? ['#454b55', '#2c3038'] : ['#7d7d86', '#5a5a63'];
   for (let y = 0; y < stage.rows; y++) {
     for (let x = 0; x < stage.cols; x++) {
       const px = x * TILE, py = y * TILE, v = grid[y][x];
-      if (v === 1 && th === 'desert') {
+      if (v === 1 && th === 'airport') {
+        // コンテナ（色つきの箱）
+        c.fillStyle = ['#b5462e', '#2e6db5', '#c49a2c'][(x + y) % 3];
+        c.fillRect(px + 1, py + 1, TILE - 2, TILE - 2);
+        c.strokeStyle = 'rgba(0,0,0,0.35)'; c.lineWidth = 1;
+        for (let i = 6; i < TILE; i += 6) { c.beginPath(); c.moveTo(px + i, py + 2); c.lineTo(px + i, py + TILE - 2); c.stroke(); }
+      } else if (v === 1 && th === 'desert') {
         c.fillStyle = '#6b5a48';
         c.fillRect(px, py, TILE, TILE);
         c.fillStyle = '#857057';
@@ -1786,6 +1938,28 @@ function buildLayers() {
     }
   }
 
+  if (th === 'airport') {
+    // プライベートジェット（ゴールの位置）
+    const [gx, gy, gw, gh] = stage.goal;
+    const cx = (gx + gw / 2) * TILE, cy = (gy + gh / 2) * TILE;
+    c.fillStyle = '#e8e8ee';
+    c.beginPath(); c.ellipse(cx, cy, 90, 18, 0, 0, Math.PI * 2); c.fill();          // 胴体
+    c.beginPath(); c.moveTo(cx - 10, cy); c.lineTo(cx - 40, cy - 75); c.lineTo(cx - 20, cy - 75); c.lineTo(cx + 25, cy); c.fill();  // 翼
+    c.beginPath(); c.moveTo(cx - 10, cy); c.lineTo(cx - 40, cy + 75); c.lineTo(cx - 20, cy + 75); c.lineTo(cx + 25, cy); c.fill();
+    c.beginPath(); c.moveTo(cx - 80, cy); c.lineTo(cx - 100, cy - 30); c.lineTo(cx - 88, cy - 30); c.lineTo(cx - 65, cy); c.fill(); // 尾翼
+    c.beginPath(); c.moveTo(cx - 80, cy); c.lineTo(cx - 100, cy + 30); c.lineTo(cx - 88, cy + 30); c.lineTo(cx - 65, cy); c.fill();
+    c.fillStyle = '#5a7ab0';
+    for (let i = -50; i < 70; i += 14) c.fillRect(cx + i, cy - 6, 7, 5);           // 窓
+  }
+  if (stage.signal) {
+    const [sx, sy, sw, sh] = stage.signal.rect;
+    c.strokeStyle = 'rgba(160,240,170,0.9)'; c.lineWidth = 3; c.setLineDash([8, 6]);
+    c.strokeRect(sx * TILE + 2, sy * TILE + 2, sw * TILE - 4, sh * TILE - 4);
+    c.setLineDash([]);
+    c.fillStyle = '#9fe0a8'; c.font = 'bold 13px sans-serif'; c.textAlign = 'center';
+    c.fillText(stage.signal.label, (sx + sw / 2) * TILE, (sy + sh / 2) * TILE + 5);
+  }
+
   c.font = 'bold 16px sans-serif'; c.textAlign = 'center';
   (stage.labels || []).forEach(l => {
     c.fillStyle = 'rgba(0,0,0,0.5)';
@@ -1814,7 +1988,7 @@ function buildLayers() {
 
 // 見張り・カメラの視界（扇形）
 function drawVision(g) {
-  if (g.state === 'stun' || g.type === 'bike' || g.type === 'chaser') return;
+  if (g.state === 'stun' || g.type === 'bike' || g.type === 'chaser' || g.type === 'ally') return;
   if (g.type === 'camera' && hackTimer > 0) return;
   const range = viewRange(g);
   const RAYS = 28;
@@ -1970,6 +2144,19 @@ function drawGuard(g) {
     ctx.restore();
     return;
   }
+  if (g.type === 'ally') {
+    // チンギスたち（緑の服）
+    ctx.rotate(g.dir);
+    ctx.fillStyle = '#2e6b3a';
+    ctx.beginPath(); ctx.arc(0, 0, GUARD_R, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#9fe0a8'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#e0b48a';
+    ctx.beginPath(); ctx.arc(3, 0, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    if (g.name) { ctx.fillStyle = '#9fe0a8'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(g.name, g.x, g.y - 18); }
+    return;
+  }
+  if (g.type === 'boss') ctx.scale(1.3, 1.3);
   if (g.type === 'bike') {
     ctx.rotate(g.dir);
     ctx.fillStyle = '#222';
@@ -1985,7 +2172,7 @@ function drawGuard(g) {
   ctx.fillStyle = 'rgba(0,0,0,0.25)';
   ctx.beginPath(); ctx.ellipse(2, 4, GUARD_R, GUARD_R * 0.7, 0, 0, Math.PI * 2); ctx.fill();
   ctx.rotate(g.dir);
-  ctx.fillStyle = g.state === 'stun' ? '#6a6a55' : g.type === 'chaser' ? '#5a2a2a' : '#4d5a2a';
+  ctx.fillStyle = g.state === 'stun' ? '#6a6a55' : g.type === 'boss' ? '#1e1e24' : g.type === 'chaser' ? '#5a2a2a' : '#4d5a2a';
   ctx.beginPath(); ctx.arc(0, 0, GUARD_R, 0, Math.PI * 2); ctx.fill();
   ctx.strokeStyle = '#2b3216'; ctx.lineWidth = 2; ctx.stroke();
   ctx.fillStyle = '#222';
@@ -1995,11 +2182,15 @@ function drawGuard(g) {
   ctx.restore();
 
   ctx.textAlign = 'center';
+  if (g.type === 'boss') {
+    ctx.fillStyle = '#ff8080'; ctx.font = 'bold 13px sans-serif';
+    ctx.fillText(g.state === 'stun' ? '周（制圧）' : `周　麻酔 あと${g.hp}発`, g.x, g.y + 32);
+  }
   ctx.font = 'bold 22px sans-serif';
   if (g.state === 'stun') {
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 14px sans-serif';
-    ctx.fillText('z z', g.x, g.y - 20 - Math.sin(elapsed * 3) * 3);
+    ctx.fillText(g.subdued ? '制圧' : 'z z', g.x, g.y - 20 - Math.sin(elapsed * 3) * 3);
   } else if (g.state === 'alert') {
     ctx.fillStyle = '#ff3030';
     ctx.fillText('!', g.x, g.y - 20);
@@ -2106,7 +2297,7 @@ function drawDarkness(camX, camY) {
 
 function drawGoal() {
   const [gx, gy, gw, gh] = stage.goal;
-  if (stage.needRescue && !prisoners.every(p => p.joined)) {
+  if (!goalUnlocked()) {
     ctx.fillStyle = '#ccc'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center';
     ctx.fillText(stage.goalLabel, (gx + gw / 2) * TILE, (gy + gh / 2) * TILE + 5);
     return;
@@ -2124,12 +2315,16 @@ function drawGoal() {
 // ステージごとの追加情報の行
 function hudLines() {
   const lines = [];
-  if (stage.hacks > 0) lines.push([hackTimer > 0 ? `ハック作動中 ${Math.ceil(hackTimer)}秒` : `ハック残り ${player.hacks}回（H）`, hackTimer > 0 ? '#ff9ee0' : '#ddd']);
+  if (stage.hacks > 0 && !stage.timeLimit) lines.push([hackTimer > 0 ? `ハック作動中 ${Math.ceil(hackTimer)}秒` : `ハック残り ${player.hacks}回（H）`, hackTimer > 0 ? '#ff9ee0' : '#ddd']);
   if (stage.needRescue) {
     const n = prisoners.filter(p => p.joined).length;
     lines.push([`鍵：${hasKey ? 'あり' : 'なし'}　救出：${n}/${prisoners.length}`, hasKey ? '#ffd54f' : '#aaa']);
   }
   if (blackoutTimer > 0) lines.push([`停電中 ${Math.ceil(blackoutTimer)}秒`, '#ff8080']);
+  // 空港は「制限時間＋ハック」を1行にまとめる（パネルを小さくするため）
+  if (stage.timeLimit) lines.push([`離陸まで ${Math.max(0, Math.ceil(timeLeft))}秒　` +
+    (hackTimer > 0 ? `ハック中 ${Math.ceil(hackTimer)}秒` : `ハック残り${player.hacks}回`), timeLeft < 30 ? '#ff8080' : '#ffd54f']);
+  if (stage.needBoss && boss) lines.push([boss.state === 'stun' ? '周：制圧 → ジェットへ！' : `周：健在（麻酔あと${boss.hp}発）`, boss.state === 'stun' ? '#8f8' : '#ff8080']);
   if (stage.chase) lines.push([`追っ手 ${guards.filter(g => g.type === 'chaser' && g.state !== 'stun').length}人`, '#ff8080']);
   return lines;
 }
@@ -2316,7 +2511,7 @@ function drawTitleBG() {
 // ステージ選択ボタン（狭い画面では2段）
 function drawStageButtons() {
   const W = window.innerWidth, H = window.innerHeight;
-  const perRow = W < 600 ? 3 : 5;
+  const perRow = W < 600 ? 3 : 6;
   const bw = Math.min(140, (W - 30) / perRow - 8), bh = 46;
   titleButtons = [];
   STAGES.forEach((s, i) => {
