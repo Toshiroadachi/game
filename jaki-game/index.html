@@ -374,14 +374,15 @@ const Voice = (() => {
   const synth = window.speechSynthesis;
   let enabled = true;
   try { enabled = localStorage.getItem('shaki_voice') !== '0'; } catch (e) {}
+  // pitch：声の高さ（1が普通。男性は低め、女性は高め）／ rate：読む速さ（1が普通）
   const PARAMS = {
-    '乃木':   { pitch: 0.9,  rate: 1.0,  g: 'm' },
-    'ノコル': { pitch: 0.7,  rate: 0.95, g: 'm' },
-    '新庄':   { pitch: 1.0,  rate: 1.08, g: 'm' },
-    'チョッキー': { pitch: 1.35, rate: 1.12, g: 'm' },
-    '東条':   { pitch: 0.8,  rate: 1.1,  g: 'm' },
-    '太田':   { pitch: 1.25, rate: 1.05, g: 'f' },
-    'ナレーション': { pitch: 1.0, rate: 0.95, g: 'n' },
+    '乃木':   { pitch: 0.7,  rate: 1.25, g: 'm' },
+    'ノコル': { pitch: 0.5,  rate: 1.2,  g: 'm' },
+    '新庄':   { pitch: 0.8,  rate: 1.3,  g: 'm' },
+    'チョッキー': { pitch: 1.1, rate: 1.35, g: 'm' },
+    '東条':   { pitch: 0.6,  rate: 1.35, g: 'm' },
+    '太田':   { pitch: 1.6,  rate: 1.3,  g: 'f' },
+    'ナレーション': { pitch: 0.9, rate: 1.2, g: 'n' },
   };
   function pickVoice(g) {
     const vs = synth ? synth.getVoices().filter(v => /^ja/i.test(v.lang)) : [];
