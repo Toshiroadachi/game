@@ -397,12 +397,29 @@ const Voice = (() => {
     const p = PARAMS[who] || PARAMS['ナレーション'];
     const clean = text.replace(/（[^）]*）/g, '').replace(/…+/g, '、').trim();
     if (!clean) return;
-    synth.cancel();
     const u = new SpeechSynthesisUtterance(clean);
     u.lang = 'ja-JP';
     const v = pickVoice(p.g);
     if (v) u.voice = v;
     u.pitch = p.pitch; u.rate = p.rate; u.volume = 1;
+    current = u;   // 途中で消されないよう保持しておく
+    // 前のせりふを止めてから話す（iPhoneでは止めた直後に話すと無音になることがあるので少し待つ）
+    if (synth.speaking || synth.pending) {
+      synth.cancel();
+      setTimeout(() => { if (current === u) { synth.resume(); synth.speak(u); } }, 80);
+    } else {
+      synth.resume();
+      synth.speak(u);
+    }
+  }
+  let current = null;
+  // 最初に画面に触れた時、無音のせりふを話しておく（iPhoneで読み上げを使えるようにするため）
+  let unlocked = false;
+  function unlock() {
+    if (unlocked || !synth) return;
+    unlocked = true;
+    const u = new SpeechSynthesisUtterance(' ');
+    u.volume = 0; u.lang = 'ja-JP';
     synth.speak(u);
   }
   function stop() { if (synth) synth.cancel(); }
@@ -414,11 +431,12 @@ const Voice = (() => {
     enabled = !enabled;
     try { localStorage.setItem('shaki_voice', enabled ? '1' : '0'); } catch (e) {}
     if (!enabled) stop();
+    else speak('ナレーション', '声をオンにしました。');
     updateBtn();
   }
   if (synth) synth.getVoices();   // 声の一覧を読み込み始める
   setTimeout(updateBtn, 0);
-  return { speak, stop, toggle, available: !!synth };
+  return { speak, stop, toggle, unlock, available: !!synth };
 })();
 
 /* =========================================================
@@ -836,7 +854,7 @@ const soundBtn = document.getElementById('soundBtn');
 soundBtn.addEventListener('pointerdown', e => { e.preventDefault(); Sound.unlock(); Sound.toggleMute(); });
 const voiceBtn = document.getElementById('voiceBtn');
 voiceBtn.addEventListener('pointerdown', e => { e.preventDefault(); Voice.toggle(); });
-window.addEventListener('pointerdown', () => Sound.unlock(), true);
+window.addEventListener('pointerdown', () => { Sound.unlock(); Voice.unlock(); }, true);
 window.addEventListener('touchend', () => Sound.unlock(), true);
 // タイトル画面・会話などでは画面タップで進む
 canvas.addEventListener('pointerdown', e => {
