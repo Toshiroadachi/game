@@ -402,9 +402,11 @@ const Voice = (() => {
     const v = pickVoice(p.g);
     if (v) u.voice = v;
     u.pitch = p.pitch; u.rate = p.rate; u.volume = 1;
+    const prev = current;
     current = u;   // 途中で消されないよう保持しておく
     // 前のせりふを止めてから話す（iPhoneでは止めた直後に話すと無音になることがあるので少し待つ）
-    if (synth.speaking || synth.pending) {
+    // 最初のせりふは止めずにそのまま話す（タップした直後に話す必要があるため）
+    if (prev && (synth.speaking || synth.pending)) {
       synth.cancel();
       setTimeout(() => { if (current === u) { synth.resume(); synth.speak(u); } }, 80);
     } else {
@@ -853,11 +855,17 @@ hackBtn.addEventListener('pointerdown', e => { e.preventDefault(); Sound.unlock(
 const soundBtn = document.getElementById('soundBtn');
 soundBtn.addEventListener('pointerdown', e => { e.preventDefault(); Sound.unlock(); Sound.toggleMute(); });
 const voiceBtn = document.getElementById('voiceBtn');
-voiceBtn.addEventListener('pointerdown', e => { e.preventDefault(); Voice.toggle(); });
-window.addEventListener('pointerdown', () => { Sound.unlock(); Voice.unlock(); }, true);
-window.addEventListener('touchend', () => Sound.unlock(), true);
+// 声のボタンは指を離した時に反応させる
+// （スマホでは「触れた瞬間」は読み上げの許可にならず、「指を離した時」でないと声が出ないため）
+voiceBtn.addEventListener('pointerdown', e => e.preventDefault());
+voiceBtn.addEventListener('pointerup', e => { e.preventDefault(); Voice.unlock(); Voice.toggle(); });
+window.addEventListener('pointerdown', () => Sound.unlock(), true);
+// 指を離した時に、音と読み上げを使えるようにする
+window.addEventListener('pointerup', () => { Sound.unlock(); Voice.unlock(); }, true);
+window.addEventListener('touchend', () => { Sound.unlock(); Voice.unlock(); }, true);
+window.addEventListener('keydown', () => Voice.unlock(), true);
 // タイトル画面・会話などでは画面タップで進む
-canvas.addEventListener('pointerdown', e => {
+canvas.addEventListener('pointerup', e => {
   if (scene === 'play') return;
   if (scene === 'story' && e.clientX < 110 && e.clientY < 60) { skipStory(); return; }
   if (scene === 'title') {
