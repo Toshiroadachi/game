@@ -67,13 +67,16 @@
     display: flex; align-items: center; justify-content: center;
     touch-action: none;
   }
+  /* タイトル画面などではパッド類を隠す */
+  body.menu #pad, body.menu #actBtn, body.menu #crouchBtn { display: none; }
+  body.menu #soundBtn { top: 10px; }
   /* マウス操作のPCでは少し控えめに表示 */
   @media (hover: hover) and (pointer: fine) {
     #pad, #actBtn, #crouchBtn { opacity: 0.45; }
   }
 </style>
 </head>
-<body>
+<body class="menu">
 <canvas id="game"></canvas>
 <div id="pad"><div id="knob"></div></div>
 <div id="actBtn">ACTION</div>
@@ -84,21 +87,27 @@
 'use strict';
 
 /* =========================================================
-   基本設定
+   基本設定（数字を変えると難易度を調整できる）
    ========================================================= */
 const TILE = 40;                 // 1マスの大きさ（ピクセル）
 const PLAYER_SPEED = 150;        // 通常の移動速度（px/秒）
 const CROUCH_SPEED = 70;         // ほふく時の移動速度
 const PLAYER_R = 12;             // プレイヤーの当たり判定の半径
 const GUARD_R = 13;              // 見張りの当たり判定の半径
-const VIEW_RANGE = 190;          // 見張りの視界の距離
+const VIEW_RANGE = 200;          // 見張りの視界の距離
 const VIEW_ANGLE = Math.PI / 2.6;// 見張りの視野角（全体）
 const CROUCH_RANGE_RATE = 0.6;   // ほふく中は見つかる距離が短くなる
-const STUN_TIME = 12;            // 麻酔で眠らせる時間（秒）
+const STUN_TIME = 10;            // 麻酔で眠らせる時間（秒）
 const PLAYER_VIEW_RANGE = 190;   // プレイヤーの視界（麻酔銃の射程）
 const PLAYER_VIEW_ANGLE = Math.PI / 2.8; // プレイヤーの視野角
-const SHOT_COOLDOWN = 1.2;       // 麻酔銃を撃ってから次に撃てるまでの時間（秒）
-const CAUGHT_PENALTY = 25;       // 見張りに捕まった時に上がる警戒度
+const SHOT_COOLDOWN = 1.5;       // 麻酔銃を撃ってから次に撃てるまでの時間（秒）
+const CAUGHT_PENALTY = 30;       // 見張りに捕まった時に上がる警戒度
+const SUSPECT_BASE = 0.4;        // 見張りが怪しむ速さ（基本）
+const SUSPECT_NEAR = 1.6;        // 見張りが怪しむ速さ（近いほど加算）
+const ALERT_PER_SEC = 15;        // 発見されている間に毎秒上がる警戒度
+const ALERT_DECAY = 6;           // 見つかっていない間に毎秒下がる警戒度
+const CHASE_SPEED = 112;         // 見張りが追いかける速さ
+const AMMO_PICKUP = 2;           // 弾薬箱で増える麻酔弾の数
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -106,14 +115,19 @@ const ctx = canvas.getContext('2d');
 /* =========================================================
    効果音・BGM（Web Audio API で音を合成。音声ファイルは使わない）
    ・スマホは画面に触れるまで音を出せないので、最初の操作で unlock() する
+   ・スマホのスピーカーは低い音が出にくいので、音はやや高めにしている
    ========================================================= */
 const Sound = (() => {
   let ac = null;          // AudioContext
   let master = null;      // 全体の音量
+  let bgmGain = null;     // BGMの音量
   let muted = false;
-  let bgmTimer = null;
-  let bgmStep = 0;
+  let bgmTimer = null;    // BGMの予約処理を回すタイマー
+  let nextTime = 0;       // 次の音を鳴らす時刻
+  let step = 0;           // BGMの何拍目か
   let tense = false;      // 見つかっている時はBGMを緊迫させる
+  let theme = 0;          // ステージごとに曲を変える
+  let wind = null;        // 環境音（風）
 
   function unlock() {
     if (!ac) {
@@ -123,116 +137,195 @@ const Sound = (() => {
       try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
       ac = new AC();
       master = ac.createGain();
-      master.gain.value = muted ? 0 : 0.6;
+      master.gain.value = muted ? 0 : 0.9;
       master.connect(ac.destination);
+      bgmGain = ac.createGain();
+      bgmGain.gain.value = 0.7;
+      bgmGain.connect(master);
     }
     if (ac.state === 'suspended') ac.resume();
   }
 
-  // 単純な音（周波数 f1 から f2 へ変化）
-  function tone(f1, f2, dur, type = 'square', vol = 0.2, delay = 0) {
-    if (!ac) return;
-    const t = ac.currentTime + delay;
+  // 時刻 t に音を鳴らす（周波数 f1 → f2 へ変化）
+  function toneAt(t, f1, f2, dur, type, vol, out) {
     const o = ac.createOscillator(), g = ac.createGain();
     o.type = type;
     o.frequency.setValueAtTime(f1, t);
     if (f2 !== f1) o.frequency.exponentialRampToValueAtTime(f2, t + dur);
-    g.gain.setValueAtTime(vol, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    o.connect(g); g.connect(master);
-    o.start(t); o.stop(t + dur + 0.02);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(vol, t + 0.005);       // プチッという雑音を防ぐ
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(out || master);
+    o.start(t); o.stop(t + dur + 0.05);
+  }
+  // 今から delay 秒後に音を鳴らす
+  function tone(f1, f2, dur, type = 'square', vol = 0.2, delay = 0) {
+    if (!ac) return;
+    toneAt(ac.currentTime + delay, f1, f2, dur, type, vol);
   }
 
-  // ノイズ音（足音・発射音など）
-  function noise(dur, vol = 0.2, freq = 1000, delay = 0) {
-    if (!ac) return;
-    const t = ac.currentTime + delay;
-    const len = Math.floor(ac.sampleRate * dur);
-    const buf = ac.createBuffer(1, len, ac.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
-    const src = ac.createBufferSource(); src.buffer = buf;
-    const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = freq;
+  // ノイズ音（足音・発射音・ハイハットなど）
+  let noiseBuf = null;
+  function getNoise() {
+    if (!noiseBuf) {
+      noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    }
+    return noiseBuf;
+  }
+  function noiseAt(t, dur, vol, freq, out, type = 'bandpass') {
+    const src = ac.createBufferSource(); src.buffer = getNoise();
+    const f = ac.createBiquadFilter(); f.type = type; f.frequency.value = freq;
     const g = ac.createGain();
     g.gain.setValueAtTime(vol, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    src.connect(f); f.connect(g); g.connect(master);
-    src.start(t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(f); f.connect(g); g.connect(out || master);
+    src.start(t, Math.random() * 0.5); src.stop(t + dur + 0.05);
+  }
+  function noise(dur, vol = 0.2, freq = 1000, delay = 0) {
+    if (!ac) return;
+    noiseAt(ac.currentTime + delay, dur, vol, freq);
   }
 
-  // BGM：低音のくり返し。見つかると速く・高くなる
-  const CALM  = [55, 0, 55, 0, 65.4, 0, 49, 0];
-  const ALERT = [110, 110, 130.8, 110, 146.8, 110, 130.8, 98];
-  function bgmTick() {
-    if (!ac || muted) return;
-    const seq = tense ? ALERT : CALM;
-    const f = seq[bgmStep % seq.length];
-    if (f) tone(f, f, tense ? 0.14 : 0.35, tense ? 'square' : 'triangle', tense ? 0.07 : 0.12);
-    // 4拍ごとに小さな「チッ」（緊張感）
-    if (bgmStep % 4 === 2) noise(0.03, tense ? 0.05 : 0.025, 6000);
-    bgmStep++;
+  /* ---- BGM ----
+     16拍で1周。0は休み。数値は周波数(Hz)
+     ・ベース：矩形波（スマホでも聞こえるよう 110〜220Hz 付近）
+     ・メロディ：三角波
+     ・リズム：キック＋ハイハット */
+  const N = { A2:110, C3:130.8, D3:146.8, E3:164.8, G2:98, G3:196, A3:220,
+              F3:174.6, C4:261.6, D4:293.7, E4:329.6, G4:392, A4:440, B4:493.9, C5:523.3, D5:587.3, E5:659.3 };
+  const THEMES = [
+    { // ステージ1：荒野（ゆったり・不穏）
+      calmBass: [N.A2,0,N.A2,0, N.A2,0,N.C3,0, N.G2,0,N.G2,0, N.E3,0,N.G2,0],
+      calmLead: [N.E4,0,0,0, 0,0,N.C5,0, N.B4,0,0,0, N.A4,0,N.G4,0],
+      calmStep: 0.21,
+    },
+    { // ステージ2：城壁・中庭（少し速く、緊張感）
+      calmBass: [N.D3,0,N.D3,N.D3, 0,N.D3,N.F3,0, N.C3,0,N.C3,N.C3, 0,N.C3,N.E3,0],
+      calmLead: [N.A4,0,0,N.D5, 0,0,N.C5,0, N.A4,0,0,N.G4, 0,0,N.E4,0],
+      calmStep: 0.18,
+    },
+  ];
+  const ALERT_BASS = [N.A2,N.A2,N.A3,N.A2, N.C3,N.C3,N.C4,N.C3, N.D3,N.D3,N.D4,N.D3, N.E3,N.E3,N.G3,N.E3];
+  const ALERT_LEAD = [N.E5,0,N.D5,0, N.E5,0,N.D5,0, N.E5,0,N.D5,0, N.C5,N.D5,N.E5,0];
+
+  function playStep(t) {
+    const th = THEMES[theme] || THEMES[0];
+    const i = step % 16;
+    const dur = tense ? 0.13 : th.calmStep;
+    const bass = tense ? ALERT_BASS[i] : th.calmBass[i];
+    const lead = tense ? ALERT_LEAD[i] : th.calmLead[i];
+    if (bass) toneAt(t, bass, bass, dur * 0.9, 'square', 0.10, bgmGain);
+    if (lead) toneAt(t, lead, lead, tense ? dur : dur * 2.5, tense ? 'square' : 'triangle', tense ? 0.06 : 0.13, bgmGain);
+    // キック（低音＋アタックのクリック音で、スマホでも「ドン」と聞こえるように）
+    if (i % (tense ? 4 : 8) === 0) {
+      toneAt(t, 160, 50, 0.18, 'sine', 0.5, bgmGain);
+      noiseAt(t, 0.02, 0.15, 1500, bgmGain);
+    }
+    // ハイハット
+    if (tense || i % 2 === 1) noiseAt(t, 0.03, tense ? 0.10 : 0.07, 8000, bgmGain, 'highpass');
+    // スネア
+    if (tense && (i === 4 || i === 12)) noiseAt(t, 0.1, 0.2, 2000, bgmGain);
+    step++;
+    return dur;
   }
-  function startBGM() {
+  // 少し先の分まで音を予約していく（タイミングがずれにくい方法）
+  function scheduler() {
+    if (!ac) return;
+    while (nextTime < ac.currentTime + 0.2) {
+      nextTime += playStep(nextTime);
+    }
+  }
+  function startBGM(themeIndex) {
     stopBGM();
-    bgmStep = 0;
-    tense = false;
-    bgmTimer = setInterval(bgmTick, 250);
+    theme = themeIndex || 0;
+    step = 0; tense = false;
+    if (!ac) return;
+    nextTime = ac.currentTime + 0.1;
+    bgmTimer = setInterval(scheduler, 50);
+    startWind();
   }
-  function stopBGM() { if (bgmTimer) clearInterval(bgmTimer); bgmTimer = null; }
-  function setTension(on) {
-    if (on === tense) return;
-    tense = on;
-    if (bgmTimer) { clearInterval(bgmTimer); bgmTimer = setInterval(bgmTick, on ? 150 : 250); }
+  function stopBGM() {
+    if (bgmTimer) clearInterval(bgmTimer);
+    bgmTimer = null;
+    stopWind();
+  }
+  function setTension(on) { tense = on; }
+
+  // 環境音：風の音（ずっと鳴っている小さなノイズ）
+  function startWind() {
+    if (!ac || wind) return;
+    const src = ac.createBufferSource(); src.buffer = getNoise(); src.loop = true;
+    const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 500; f.Q.value = 0.7;
+    const g = ac.createGain(); g.gain.value = 0.05;
+    // 風の強さをゆっくり変える
+    const lfo = ac.createOscillator(), lfoGain = ac.createGain();
+    lfo.frequency.value = 0.15; lfoGain.gain.value = 300;
+    lfo.connect(lfoGain); lfoGain.connect(f.frequency);
+    src.connect(f); f.connect(g); g.connect(master);
+    src.start(); lfo.start();
+    wind = { src, lfo };
+  }
+  function stopWind() {
+    if (!wind) return;
+    try { wind.src.stop(); wind.lfo.stop(); } catch (e) {}
+    wind = null;
   }
 
   function toggleMute() {
     muted = !muted;
-    if (master) master.gain.value = muted ? 0 : 0.6;
+    if (master) master.gain.value = muted ? 0 : 0.9;
     const b = document.getElementById('soundBtn');
     if (b) b.textContent = muted ? '🔇' : '🔊';
   }
 
   return {
     unlock, startBGM, stopBGM, setTension, toggleMute,
-    step:    () => noise(0.05, 0.06, 300),                          // 足音
-    crouch:  () => tone(300, 200, 0.08, 'triangle', 0.15),          // ほふく切り替え
-    shot:    () => { noise(0.12, 0.25, 2500); tone(1200, 400, 0.1, 'sine', 0.1); }, // 麻酔銃「プシュッ」
-    hit:     () => tone(180, 60, 0.25, 'sine', 0.3),                // 命中して倒れる
-    suspect: () => tone(700, 900, 0.12, 'sine', 0.15),              // 「?」
-    alert:   () => { tone(880, 880, 0.12, 'square', 0.2); tone(1320, 1320, 0.25, 'square', 0.2, 0.12); }, // 「!」
-    caught:  () => { noise(0.2, 0.3, 400); tone(200, 80, 0.3, 'sawtooth', 0.2); },
-    clear:   () => [523, 659, 784, 1047].forEach((f, i) => tone(f, f, 0.25, 'square', 0.15, i * 0.15)),
-    gameOver:() => [392, 330, 262, 196].forEach((f, i) => tone(f, f * 0.97, 0.35, 'sawtooth', 0.15, i * 0.25)),
+    step:    (soft) => noise(0.05, soft ? 0.08 : 0.22, soft ? 600 : 1200),  // 足音
+    crouch:  () => { tone(500, 300, 0.1, 'triangle', 0.3); noise(0.08, 0.15, 900); },        // ほふく切り替え
+    shot:    () => { noise(0.12, 0.45, 2500); tone(1400, 400, 0.12, 'square', 0.12); },        // 麻酔銃「プシュッ」
+    hit:     () => { tone(400, 120, 0.3, 'square', 0.2); noise(0.2, 0.3, 500); },             // 命中して倒れる
+    empty:   () => { tone(1500, 1500, 0.04, 'square', 0.15); tone(1500, 1500, 0.04, 'square', 0.15, 0.08); }, // 弾切れ「カチカチ」
+    pickup:  () => [880, 1175, 1568].forEach((f, i) => tone(f, f, 0.1, 'square', 0.15, i * 0.07)),          // 弾薬を拾った
+    suspect: () => { tone(800, 1200, 0.15, 'square', 0.15); tone(1200, 1200, 0.1, 'square', 0.12, 0.17); }, // 「?」
+    alert:   () => { tone(988, 988, 0.1, 'square', 0.3); tone(1480, 1480, 0.35, 'square', 0.3, 0.1); },     // 「!」
+    siren:   () => { for (let i = 0; i < 3; i++) { tone(700, 1100, 0.25, 'sawtooth', 0.18, i * 0.5); tone(1100, 700, 0.25, 'sawtooth', 0.18, i * 0.5 + 0.25); } }, // サーチライト警報
+    caught:  () => { noise(0.25, 0.5, 400); tone(300, 80, 0.35, 'sawtooth', 0.3); },
+    start:   () => [523, 659, 784].forEach((f, i) => tone(f, f, 0.12, 'square', 0.15, i * 0.1)),
+    clear:   () => [523, 659, 784, 1047, 784, 1047].forEach((f, i) => tone(f, f, i === 5 ? 0.5 : 0.18, 'square', 0.2, i * 0.14)),
+    gameOver:() => [392, 330, 262, 196].forEach((f, i) => tone(f, f * 0.97, 0.4, 'sawtooth', 0.2, i * 0.28)),
   };
 })();
 
 /* =========================================================
    ステージデータ
    ・座標はすべて「マス」単位（ゲーム内でピクセルに変換）
-   ・後でステージ2〜4を追加しやすいよう配列にしている
+   ・rocks は通れない障害物（ステージ1は岩、ステージ2は木箱）
+   ・walls は城壁・建物、bushes は草むら（ほふくで隠れられる）
    ========================================================= */
 const STAGES = [
   {
     name: 'STAGE 1  城外の荒野',
+    theme: 'desert',
     cols: 40, rows: 25,
     start: [2, 12],
-    goal: [37, 11, 2, 3],            // 脱出（到達）地点 [x, y, 幅, 高さ]
-    // 岩（通れない・視線を遮る）
+    goal: [37, 11, 2, 3],            // 到達地点 [x, y, 幅, 高さ]
+    goalLabel: '城門',
+    ammo: 4,                          // 最初に持っている麻酔弾
+    ammoItems: [[19.5, 12.5]],        // 弾薬箱の位置
     rocks: [
       [6,4,2,3],[5,17,3,2],[11,6,3,3],[11,15,2,4],[15,2,2,5],[15,19,2,4],
       [20,9,2,2],[20,14,2,2],[24,3,3,2],[24,20,3,2],[23,11,1,3],
       [29,7,2,3],[29,15,2,3],[33,2,2,2],[33,21,2,2],
     ],
-    // 城壁（通れない・視線を遮る）。右端が城、門の部分だけ開いている
-    walls: [
-      [36,0,4,11],[36,14,4,11],
-    ],
-    // 草むら（通れる。ほふくで入ると隠れられる）
-    bushes: [
-      [13,10,3,5],[18,2,3,3],[18,19,3,3],[26,10,2,5],[31,11,2,3],[8,9,2,2],
-    ],
+    // 城壁。右端が城、門の部分だけ開いている
+    walls: [[36,0,4,11],[36,14,4,11]],
+    bushes: [[13,10,3,5],[18,2,3,3],[18,19,3,3],[26,10,2,5],[31,11,2,3],[8,9,2,2]],
+    floors: [{ rect: [36,11,4,3], color: '#4a4a52' }],   // 城門の通路（石畳）
+    labels: [{ x: 38, y: 5, text: 'ジャキ城' }],
     // 見張り
-    //  type 'patrol' : 巡回ルート（waypoints）を往復・周回
+    //  type 'patrol' : 巡回ルート（waypoints）を往復（loop: true なら周回）
     //  type 'turn'   : その場で首を振る（center: 向きの中心, amp: 振れ幅）
     guards: [
       { type: 'patrol', waypoints: [[17.5,7.5],[17.5,17.5]], loop: false },
@@ -241,14 +334,65 @@ const STAGES = [
       { type: 'patrol', waypoints: [[28.5,5.5],[32.5,5.5],[32.5,19.5],[28.5,19.5]], loop: true },
       { type: 'turn', pos: [34.5,12.5], center: Math.PI, amp: 0.9 },
     ],
-    // ヒント（その範囲に入ると画面下に表示）
+    searchlights: [],
+    // ヒント（その範囲に入った時に数秒だけ表示）
     hints: [
-      { area: [0,0,9,25],  text: '矢印キー（スマホは左下のパッド）で移動。右端の城門をめざせ。青い扇形があなたの視界。' },
-      { area: [9,0,9,25],  text: '黄色い扇形が見張りの視界。入ると「?」→ ゲージが満タンで「!」発見。C／ほふくボタンで低い姿勢になると見つかりにくく、草むらに隠れられる。' },
-      { area: [18,0,10,25],text: '自分の視界（青）に見張りが入ると照準が出る。SPACE／ACTIONで麻酔銃 → 12秒眠らせる。' },
-      { area: [28,0,8,25], text: '警戒度が100%でゲームオーバー。光っている城門に入ればクリア！' },
+      { area: [0,0,9,25],  text: '移動して右端の城門をめざせ。青い扇形があなたの視界。' },
+      { area: [9,0,9,25],  text: '黄色い扇形は見張りの視界。「ほふく」で見つかりにくくなり、草むらに隠れられる。' },
+      { area: [18,0,10,25],text: '視界内の見張りに照準 → ACTIONで麻酔銃。弾には限りがある。緑の箱で補充。' },
+      { area: [28,0,8,25], text: '警戒度100%でゲームオーバー。光る城門に入ればクリア！' },
     ],
     intro: '人質が囚われているジャキ城へ潜入せよ。まずは城外の荒野を抜け、城門へ向かえ。',
+    clearText: '城門への潜入に成功した',
+  },
+  {
+    name: 'STAGE 2  城壁・中庭',
+    theme: 'courtyard',
+    cols: 40, rows: 25,
+    start: [3, 12],
+    goal: [34, 11, 3, 3],
+    goalLabel: '地下牢入口',
+    ammo: 4,
+    ammoItems: [[15.5, 3.5], [28.5, 22.5]],
+    // 木箱（通れない・視線をさえぎる）
+    rocks: [
+      [4,9,1,1],[4,15,1,1],[14,10,1,1],[14,14,1,1],[15,5,2,1],[15,19,2,1],
+      [21,11,1,3],[29,3,2,2],[29,20,2,2],[30,11,1,1],[30,13,1,1],
+    ],
+    walls: [
+      [0,0,2,11],[0,14,2,11],          // 入ってきた城壁（左）
+      [7,3,5,4],[7,18,5,4],            // 兵舎
+      [18,1,2,8],[18,16,2,8],          // 中庭を仕切る内壁（真ん中が門）
+      [24,5,4,3],[24,17,4,3],          // 倉庫
+      [34,0,6,11],[34,14,6,11],[37,11,3,3], // 天守（右）
+    ],
+    bushes: [[14,11,2,3],[2,2,2,2],[2,21,2,2],[26,11,2,3]],
+    floors: [{ rect: [0,11,2,3], color: '#4a4a52' }, { rect: [34,11,3,3], color: '#2c2c33' }],
+    labels: [
+      { x: 9.5, y: 5.3, text: '兵舎' }, { x: 9.5, y: 20.3, text: '兵舎' },
+      { x: 26, y: 6.8, text: '倉庫' }, { x: 26, y: 18.8, text: '倉庫' },
+      { x: 37, y: 5, text: '天守' },
+    ],
+    guards: [
+      { type: 'patrol', waypoints: [[6.5,2.5],[13.5,2.5],[13.5,8.5],[6.5,8.5]], loop: true },
+      { type: 'patrol', waypoints: [[13.5,22.5],[6.5,22.5],[6.5,16.5],[13.5,16.5]], loop: true },
+      { type: 'turn', pos: [20.5,12.5], center: Math.PI, amp: 1.0 },
+      { type: 'patrol', waypoints: [[22.5,3.5],[22.5,21.5]], loop: false },
+      { type: 'patrol', waypoints: [[24.5,10.5],[31.5,10.5],[31.5,14.5],[24.5,14.5]], loop: true },
+      { type: 'turn', pos: [32.5,12.5], center: Math.PI, amp: 0.7 },
+    ],
+    // サーチライト（path を順に回る光の円。照らされると周りの見張りが駆けつける）
+    searchlights: [
+      { path: [[19,8.5],[19,16.5]], speed: 60, r: 55 },
+      { path: [[26.5,3.5],[32.5,3.5],[32.5,21.5],[26.5,21.5]], speed: 80, r: 55 },
+    ],
+    hints: [
+      { area: [0,0,7,25],  text: '白い光はサーチライト。照らされ続けると警報が鳴り、近くの見張りが駆けつける。' },
+      { area: [7,0,11,25], text: '中央の門をサーチライトが往復している。光が離れた隙に抜けろ。' },
+      { area: [18,0,16,25],text: '地下牢の入口は右奥、天守の前。麻酔弾は温存しよう。' },
+    ],
+    intro: '城内に潜入した。中庭を抜け、天守の前にある地下牢の入口をめざせ。',
+    clearText: '地下牢の入口にたどり着いた',
   },
 ];
 
@@ -258,18 +402,33 @@ const STAGES = [
 let scene = 'title';      // 'title' | 'play' | 'clear' | 'over'
 let stageIndex = 0;
 let stage = null;         // 現在のステージデータ
-let grid = null;          // 当たり判定用のマス目（0:空き 1:岩 2:壁）
+let grid = null;          // 当たり判定用のマス目（0:空き 1:障害物 2:壁）
 let bushGrid = null;      // 草むらのマス目
 let player = null;
 let guards = [];
+let lights = [];          // サーチライト
+let items = [];           // 弾薬箱
 let alertLevel = 0;       // 警戒度（0〜100）
 let elapsed = 0;          // 経過時間
 let overReason = '';
-let introTimer = 0;
-let staticLayer = null;   // 地面・岩・壁を事前描画した画像
+let staticLayer = null;   // 地面・障害物・壁を事前描画した画像
 let bushLayer = null;     // 草むらを事前描画した画像
 let shots = [];           // 麻酔銃の弾道エフェクト
 let flashTimer = 0;       // 捕まった時に画面を赤く光らせる時間
+let hintText = '';        // 表示中のヒント
+let hintTimer = 0;        // ヒントを表示する残り時間
+let shownHints = new Set(); // 表示済みのヒント（同じヒントは1回だけ）
+let titleSelect = 0;      // タイトル画面で選んでいるステージ
+let titleButtons = [];    // タイトル画面のステージボタンの位置
+
+// 遊べるステージ数（クリアすると次が解放。ブラウザに保存）
+let unlocked = 1;
+try { unlocked = Math.max(1, Math.min(STAGES.length, parseInt(localStorage.getItem('jaki_unlocked'), 10) || 1)); } catch (e) {}
+function unlockStage(n) {
+  if (n <= unlocked) return;
+  unlocked = Math.min(STAGES.length, n);
+  try { localStorage.setItem('jaki_unlocked', String(unlocked)); } catch (e) {}
+}
 
 /* =========================================================
    入力（キーボード＋タッチ）
@@ -278,12 +437,17 @@ const keys = {};
 const touchVec = { x: 0, y: 0 };
 
 window.addEventListener('keydown', e => {
-  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' ','Space'].includes(e.key) || e.code === 'Space') {
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key) || e.code === 'Space') {
     e.preventDefault();
   }
   if (e.repeat) return;
   keys[e.code] = true;
   Sound.unlock();
+  // タイトル画面ではステージ選択
+  if (scene === 'title') {
+    if (e.code === 'ArrowLeft' || e.code === 'ArrowUp') titleSelect = Math.max(0, titleSelect - 1);
+    if (e.code === 'ArrowRight' || e.code === 'ArrowDown') titleSelect = Math.min(unlocked - 1, titleSelect + 1);
+  }
   if (e.code === 'Space' || e.code === 'Enter') onAction();
   if (e.code === 'KeyC' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') toggleCrouch();
   if (e.code === 'KeyM') Sound.toggleMute();
@@ -332,8 +496,17 @@ soundBtn.addEventListener('pointerdown', e => { e.preventDefault(); Sound.unlock
 // どこかに触れた最初のタイミングで音を使えるようにする（スマホは操作がないと音が出せないため）
 window.addEventListener('pointerdown', () => Sound.unlock(), true);
 window.addEventListener('touchend', () => Sound.unlock(), true);
-// タイトル画面などでは画面タップでも開始できる
-canvas.addEventListener('pointerdown', () => { if (scene !== 'play') onAction(); });
+// タイトル画面などでは画面タップでも進める
+canvas.addEventListener('pointerdown', e => {
+  if (scene === 'play') return;
+  if (scene === 'title') {
+    // ステージボタンをタップしたら、そのステージを選ぶ
+    const b = titleButtons.find(b => e.clientX >= b.x && e.clientX <= b.x + b.w &&
+                                     e.clientY >= b.y && e.clientY <= b.y + b.h);
+    if (b) { if (b.locked) return; titleSelect = b.index; }
+  }
+  onAction();
+});
 
 // 移動方向を取得（キーボードとタッチを合成）
 function getMoveVec() {
@@ -350,14 +523,21 @@ function getMoveVec() {
 
 // スペース／アクションボタンが押されたとき
 function onAction() {
-  if (scene === 'title') { startStage(0); return; }
+  if (scene === 'title') { startStage(titleSelect); return; }
   if (scene === 'over')  { startStage(stageIndex); return; }
-  if (scene === 'clear') { scene = 'title'; return; }
+  if (scene === 'clear') {
+    // 次のステージがあれば進む。なければタイトルへ
+    if (stageIndex + 1 < STAGES.length) startStage(stageIndex + 1);
+    else { titleSelect = stageIndex; scene = 'title'; }
+    return;
+  }
   if (scene !== 'play') return;
 
   // 麻酔銃：自分の視界の中にいる見張りを眠らせる
   if (player.cooldown > 0) return;
+  if (player.ammo <= 0) { Sound.empty(); player.cooldown = 0.3; return; }
   player.cooldown = SHOT_COOLDOWN;
+  player.ammo--;
   const target = findShotTarget();
   if (target) {
     target.state = 'stun';
@@ -390,15 +570,16 @@ function startStage(index) {
   stage = STAGES[index];
   const { cols, rows } = stage;
 
-  // マス目を作成（外周は岩で囲む。ただし城壁の部分はそのまま）
+  // マス目を作成（外周は通れないようにする）
   grid = [];
   bushGrid = [];
   for (let y = 0; y < rows; y++) {
     grid.push(new Array(cols).fill(0));
     bushGrid.push(new Array(cols).fill(false));
   }
-  for (let x = 0; x < cols; x++) { grid[0][x] = 1; grid[rows - 1][x] = 1; }
-  for (let y = 0; y < rows; y++) { grid[y][0] = 1; }
+  const edge = stage.theme === 'desert' ? 1 : 2;   // 外周：荒野は岩、城内は壁
+  for (let x = 0; x < cols; x++) { grid[0][x] = edge; grid[rows - 1][x] = edge; }
+  for (let y = 0; y < rows; y++) { grid[y][0] = edge; }
   const fill = (rects, v) => rects.forEach(([rx, ry, rw, rh]) => {
     for (let y = ry; y < ry + rh; y++)
       for (let x = rx; x < rx + rw; x++)
@@ -418,6 +599,7 @@ function startStage(index) {
     cooldown: 0,      // 麻酔銃の再使用までの時間
     invuln: 0,        // 捕まった直後の無敵時間
     stepTimer: 0,     // 足音の間隔
+    ammo: stage.ammo, // 麻酔弾の残り
   };
   crouchBtn.classList.remove('on');
   shots = [];
@@ -443,13 +625,28 @@ function startStage(index) {
     };
   });
 
+  // サーチライト
+  lights = (stage.searchlights || []).map(l => ({
+    ...l,
+    x: l.path[0][0] * TILE, y: l.path[0][1] * TILE,
+    wp: 1, wpStep: 1,
+    susp: 0,         // 照らされている度合い（1で警報）
+    cool: 0,         // 警報の後、次に鳴るまでの時間
+  }));
+
+  // 弾薬箱
+  items = (stage.ammoItems || []).map(([x, y]) => ({ x: x * TILE, y: y * TILE, taken: false }));
+
   alertLevel = 0;
   elapsed = 0;
-  introTimer = 5;
+  hintText = stage.intro;
+  hintTimer = 6;
+  shownHints = new Set();
   buildLayers();
   resize();
   scene = 'play';
-  Sound.startBGM();
+  Sound.start();
+  Sound.startBGM(index);
 }
 
 /* =========================================================
@@ -482,7 +679,7 @@ function moveWithCollision(obj, dx, dy, r) {
   if (!circleHitsWall(obj.x + dx, obj.y, r)) obj.x += dx;
   if (!circleHitsWall(obj.x, obj.y + dy, r)) obj.y += dy;
 }
-// 2点間の視線が通るか（岩や壁で遮られていないか）
+// 2点間の視線が通るか（障害物や壁で遮られていないか）
 function lineOfSight(x1, y1, x2, y2) {
   const d = Math.hypot(x2 - x1, y2 - y1);
   const steps = Math.ceil(d / 6);
@@ -509,9 +706,13 @@ function inBush(x, y) {
   const tx = Math.floor(x / TILE), ty = Math.floor(y / TILE);
   return !!(bushGrid[ty] && bushGrid[ty][tx]);
 }
+// 草むらでほふくして隠れているか
+function hidden() {
+  return player.crouch && inBush(player.x, player.y);
+}
 
 /* =========================================================
-   見張りが プレイヤーを見ているか
+   見張りがプレイヤーを見ているか
    ========================================================= */
 function guardCanSee(g) {
   if (g.state === 'stun') return false;
@@ -521,7 +722,7 @@ function guardCanSee(g) {
   let range = VIEW_RANGE * (player.crouch ? CROUCH_RANGE_RATE : 1);
   if (g.state === 'alert') range = VIEW_RANGE * 1.2; // 警戒中はよく見ている
   // ほふくで草むらに隠れていると、すぐ近く以外は見えない
-  if (player.crouch && inBush(player.x, player.y) && g.state !== 'alert') range = 45;
+  if (hidden() && g.state !== 'alert') range = 45;
   if (dist > range) return false;
   // すぐ近く（体が触れるほど）なら向きに関係なく気づく
   if (dist > 30 && Math.abs(angleDiff(Math.atan2(dy, dx), g.dir)) > VIEW_ANGLE / 2) return false;
@@ -550,7 +751,7 @@ function findShotTarget() {
 function update(dt) {
   if (scene !== 'play') return;
   elapsed += dt;
-  if (introTimer > 0) introTimer -= dt;
+  if (hintTimer > 0) hintTimer -= dt;
   if (player.cooldown > 0) player.cooldown -= dt;
   if (player.invuln > 0) player.invuln -= dt;
   if (flashTimer > 0) flashTimer -= dt;
@@ -564,9 +765,27 @@ function update(dt) {
     player.dir = Math.atan2(mv.y, mv.x);
     player.walk += dt * (player.crouch ? 6 : 12);
     moveWithCollision(player, mv.x * speed * dt, mv.y * speed * dt, PLAYER_R);
-    // 足音（ほふく中は鳴らない）
+    // 足音（ほふく中は小さく、ゆっくり）
     player.stepTimer -= dt;
-    if (!player.crouch && player.stepTimer <= 0) { Sound.step(); player.stepTimer = 0.32; }
+    if (player.stepTimer <= 0) {
+      Sound.step(player.crouch);
+      player.stepTimer = player.crouch ? 0.55 : 0.3;
+    }
+  }
+
+  // --- ヒント：新しいエリアに入った時に1回だけ数秒表示 ---
+  const tx = player.x / TILE, ty = player.y / TILE;
+  const h = stage.hints.find(h => tx >= h.area[0] && tx < h.area[0] + h.area[2] &&
+                                  ty >= h.area[1] && ty < h.area[1] + h.area[3]);
+  if (h && !shownHints.has(h) && hintTimer <= 0.3) { shownHints.add(h); hintText = h.text; hintTimer = 5; }
+
+  // --- 弾薬箱を拾う ---
+  for (const it of items) {
+    if (!it.taken && Math.hypot(player.x - it.x, player.y - it.y) < 24) {
+      it.taken = true;
+      player.ammo += AMMO_PICKUP;
+      Sound.pickup();
+    }
   }
 
   // --- 見張りの行動 ---
@@ -574,23 +793,26 @@ function update(dt) {
   for (const g of guards) {
     updateGuard(g, dt);
     if (g.state === 'alert') anyAlert = true;
-    // 警戒中の見張りに捕まると警戒度が大きく上がり、少し突き飛ばされる（即終了ではない）
+    // 警戒中の見張りに捕まると警戒度が大きく上がり、突き飛ばされる
     if (g.state === 'alert' && player.invuln <= 0 &&
         Math.hypot(player.x - g.x, player.y - g.y) < PLAYER_R + GUARD_R) {
       alertLevel = Math.min(100, alertLevel + CAUGHT_PENALTY);
       player.invuln = 1.5;
-      g.pause = 1.5;
+      g.pause = 1.2;
       flashTimer = 0.4;
       const a = Math.atan2(player.y - g.y, player.x - g.x);
       moveWithCollision(player, Math.cos(a) * 40, Math.sin(a) * 40, PLAYER_R);
       Sound.caught();
     }
   }
+
+  // --- サーチライト ---
+  for (const l of lights) updateLight(l, dt);
+
   Sound.setTension(anyAlert);
 
   // --- 警戒度 ---
-  // 見つかっていない間はゆっくり下がる
-  if (!anyAlert) alertLevel = Math.max(0, alertLevel - 6 * dt);
+  if (!anyAlert) alertLevel = Math.max(0, alertLevel - ALERT_DECAY * dt);
   if (alertLevel >= 100) { gameOver('警戒度が最大になった！'); return; }
 
   // --- ゴール判定 ---
@@ -598,13 +820,54 @@ function update(dt) {
   if (player.x > gx * TILE && player.x < (gx + gw) * TILE &&
       player.y > gy * TILE && player.y < (gy + gh) * TILE) {
     scene = 'clear';
+    unlockStage(stageIndex + 2);
     Sound.stopBGM();
     Sound.clear();
   }
 }
 
+// サーチライトの移動と、照らされた時の警報
+function updateLight(l, dt) {
+  // 決まったルートを移動（往復または周回）
+  const p = l.path[l.wp];
+  const tx = p[0] * TILE, ty = p[1] * TILE;
+  const dx = tx - l.x, dy = ty - l.y, d = Math.hypot(dx, dy);
+  const step = l.speed * dt;
+  if (d <= step) {
+    l.x = tx; l.y = ty;
+    if (l.path.length > 2) l.wp = (l.wp + 1) % l.path.length;
+    else l.wp = 1 - l.wp;
+  } else {
+    l.x += dx / d * step; l.y += dy / d * step;
+  }
+
+  if (l.cool > 0) { l.cool -= dt; return; }
+  // 照らされているか（草むらにほふくで隠れていれば見つからない）
+  const lit = Math.hypot(player.x - l.x, player.y - l.y) < l.r && !hidden();
+  if (lit) {
+    const before = l.susp;
+    l.susp += dt * 1.4;
+    if (before === 0) Sound.suspect();
+    if (l.susp >= 1) {
+      // 警報！ 近くの見張りが一斉にプレイヤーの位置へ向かう
+      l.susp = 0;
+      l.cool = 4;
+      alertLevel = Math.min(100, alertLevel + 20);
+      Sound.siren();
+      for (const g of guards) {
+        if (g.state === 'stun') continue;
+        if (Math.hypot(g.x - player.x, g.y - player.y) > 500) continue;
+        g.state = 'alert'; g.susp = 1; g.lostTimer = 0;
+        g.lastX = player.x; g.lastY = player.y;
+      }
+    }
+  } else {
+    l.susp = Math.max(0, l.susp - dt * 0.8);
+  }
+}
+
 function updateGuard(g, dt) {
-  const PATROL_SPEED = 55, CHASE_SPEED = 105;
+  const PATROL_SPEED = 55;
 
   // 気絶中
   if (g.state === 'stun') {
@@ -624,10 +887,10 @@ function updateGuard(g, dt) {
     // --- 警戒状態：プレイヤーを追いかける ---
     if (g.seen) {
       g.lostTimer = 0;
-      alertLevel = Math.min(100, alertLevel + 12 * dt);
+      alertLevel = Math.min(100, alertLevel + ALERT_PER_SEC * dt);
     } else {
       g.lostTimer += dt;
-      if (g.lostTimer > 2.5) { g.state = 'search'; g.searchTimer = 3; g.susp = 0.2; }
+      if (g.lostTimer > 3) { g.state = 'search'; g.searchTimer = 3; g.susp = 0.2; }
     }
     moveGuardTo(g, g.lastX, g.lastY, CHASE_SPEED, dt);
     return;
@@ -636,9 +899,9 @@ function updateGuard(g, dt) {
   // --- 怪しさの増減 ---
   if (g.seen) {
     const dist = Math.hypot(player.x - g.x, player.y - g.y);
-    // 近いほど早く気づく（遠くなら2秒以上かかるので、気づかれかけても逃げられる）
+    // 近いほど早く気づく
     const before = g.susp;
-    g.susp += dt * (0.3 + 1.3 * Math.max(0, 1 - dist / VIEW_RANGE));
+    g.susp += dt * (SUSPECT_BASE + SUSPECT_NEAR * Math.max(0, 1 - dist / VIEW_RANGE));
     if (before < 0.05 && g.susp >= 0.05) Sound.suspect();
     if (g.susp >= 1) {
       g.susp = 1;
@@ -649,7 +912,7 @@ function updateGuard(g, dt) {
       return;
     }
   } else {
-    g.susp = Math.max(0, g.susp - dt * 0.4);
+    g.susp = Math.max(0, g.susp - dt * 0.35);
   }
 
   // 少し怪しいと思ったら立ち止まってその方向を見る
@@ -741,35 +1004,56 @@ function seededRandom(seed) {
   return () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
 }
 
-// 地面・岩・壁・草むらを事前に描いておく（毎フレーム描くと重いため）
+// 地面・障害物・壁・草むらを事前に描いておく（毎フレーム描くと重いため）
 function buildLayers() {
   const W = stage.cols * TILE, H = stage.rows * TILE;
-  const rnd = seededRandom(12345);
+  const rnd = seededRandom(12345 + stageIndex);
+  const desert = stage.theme === 'desert';
 
   staticLayer = document.createElement('canvas');
   staticLayer.width = W; staticLayer.height = H;
   const c = staticLayer.getContext('2d');
 
-  // 荒野の地面
-  c.fillStyle = '#b89a6a';
-  c.fillRect(0, 0, W, H);
-  for (let i = 0; i < 2500; i++) {
-    c.fillStyle = rnd() < 0.5 ? 'rgba(90,60,30,0.15)' : 'rgba(255,240,200,0.15)';
-    const s = 1 + rnd() * 3;
-    c.fillRect(rnd() * W, rnd() * H, s, s);
+  if (desert) {
+    // 荒野の地面
+    c.fillStyle = '#b89a6a';
+    c.fillRect(0, 0, W, H);
+    for (let i = 0; i < 2500; i++) {
+      c.fillStyle = rnd() < 0.5 ? 'rgba(90,60,30,0.15)' : 'rgba(255,240,200,0.15)';
+      const s = 1 + rnd() * 3;
+      c.fillRect(rnd() * W, rnd() * H, s, s);
+    }
+    // 轍（わだち）っぽい道
+    c.strokeStyle = 'rgba(120,90,50,0.25)';
+    c.lineWidth = 18;
+    c.beginPath(); c.moveTo(0, 12.5 * TILE);
+    c.bezierCurveTo(10 * TILE, 9 * TILE, 25 * TILE, 16 * TILE, 37 * TILE, 12.5 * TILE);
+    c.stroke();
+  } else {
+    // 中庭の石畳
+    c.fillStyle = '#8f8574';
+    c.fillRect(0, 0, W, H);
+    for (let y = 0; y < stage.rows * 2; y++) {
+      for (let x = 0; x < stage.cols * 2; x++) {
+        const v = Math.floor(rnd() * 20) - 10;
+        c.fillStyle = `rgb(${143 + v},${133 + v},${116 + v})`;
+        c.fillRect(x * 20 + 1, y * 20 + 1, 18, 18);
+      }
+    }
   }
-  // 轍（わだち）っぽい道
-  c.strokeStyle = 'rgba(120,90,50,0.25)';
-  c.lineWidth = 18;
-  c.beginPath(); c.moveTo(0, 12.5 * TILE);
-  c.bezierCurveTo(10 * TILE, 9 * TILE, 25 * TILE, 16 * TILE, 37 * TILE, 12.5 * TILE);
-  c.stroke();
 
-  // 岩
+  // 床の飾り（門の通路など）
+  (stage.floors || []).forEach(f => {
+    const [x, y, w, h] = f.rect;
+    c.fillStyle = f.color;
+    c.fillRect(x * TILE, y * TILE, w * TILE, h * TILE);
+  });
+
   for (let y = 0; y < stage.rows; y++) {
     for (let x = 0; x < stage.cols; x++) {
-      if (grid[y][x] === 1) {
-        const px = x * TILE, py = y * TILE;
+      const px = x * TILE, py = y * TILE;
+      if (grid[y][x] === 1 && desert) {
+        // 岩
         c.fillStyle = '#6b5a48';
         c.fillRect(px, py, TILE, TILE);
         c.fillStyle = '#857057';
@@ -781,9 +1065,18 @@ function buildLayers() {
         c.closePath(); c.fill();
         c.strokeStyle = 'rgba(0,0,0,0.25)'; c.lineWidth = 1;
         c.strokeRect(px + 0.5, py + 0.5, TILE - 1, TILE - 1);
+      } else if (grid[y][x] === 1) {
+        // 木箱
+        c.fillStyle = '#8a5a2b';
+        c.fillRect(px + 2, py + 2, TILE - 4, TILE - 4);
+        c.strokeStyle = '#5a3a1a'; c.lineWidth = 3;
+        c.strokeRect(px + 3.5, py + 3.5, TILE - 7, TILE - 7);
+        c.beginPath();
+        c.moveTo(px + 4, py + 4); c.lineTo(px + TILE - 4, py + TILE - 4);
+        c.moveTo(px + TILE - 4, py + 4); c.lineTo(px + 4, py + TILE - 4);
+        c.stroke();
       } else if (grid[y][x] === 2) {
-        // 城壁（レンガ模様）
-        const px = x * TILE, py = y * TILE;
+        // 城壁・建物（レンガ模様）
         c.fillStyle = '#7d7d86';
         c.fillRect(px, py, TILE, TILE);
         c.strokeStyle = '#5a5a63'; c.lineWidth = 2;
@@ -798,12 +1091,16 @@ function buildLayers() {
       }
     }
   }
-  // 城門の通路（石畳）
-  const [gx, gy, gw, gh] = stage.goal;
-  c.fillStyle = '#4a4a52';
-  c.fillRect(36 * TILE, gy * TILE, 4 * TILE, gh * TILE);
-  c.fillStyle = '#ddd'; c.font = 'bold 16px sans-serif'; c.textAlign = 'center';
-  c.fillText('ジャキ城', 38 * TILE, 5 * TILE);
+
+  // 建物の名前など
+  c.fillStyle = '#eee'; c.font = 'bold 16px sans-serif'; c.textAlign = 'center';
+  (stage.labels || []).forEach(l => {
+    c.fillStyle = 'rgba(0,0,0,0.5)';
+    const w = c.measureText(l.text).width + 12;
+    c.fillRect(l.x * TILE - w / 2, l.y * TILE - 16, w, 22);
+    c.fillStyle = '#eee';
+    c.fillText(l.text, l.x * TILE, l.y * TILE);
+  });
 
   // 草むら（プレイヤーの上に重ねて描くので別の画像に）
   bushLayer = document.createElement('canvas');
@@ -822,7 +1119,7 @@ function buildLayers() {
   }
 }
 
-// 見張りの視界（扇形）を、岩でさえぎられた形で描く
+// 見張りの視界（扇形）を、障害物でさえぎられた形で描く
 function drawVision(g) {
   if (g.state === 'stun') return;
   const range = g.state === 'alert' ? VIEW_RANGE * 1.2 : VIEW_RANGE;
@@ -844,6 +1141,22 @@ function drawVision(g) {
   else if (g.susp > 0.25 || g.state === 'search') ctx.fillStyle = 'rgba(255,150,0,0.30)';
   else ctx.fillStyle = 'rgba(255,240,80,0.22)';
   ctx.fill();
+}
+
+// サーチライトの光
+function drawLight(l) {
+  const grad = ctx.createRadialGradient(l.x, l.y, 0, l.x, l.y, l.r);
+  const red = l.susp > 0;
+  grad.addColorStop(0, red ? 'rgba(255,200,180,0.65)' : 'rgba(255,255,230,0.55)');
+  grad.addColorStop(0.8, red ? 'rgba(255,160,140,0.35)' : 'rgba(255,255,220,0.30)');
+  grad.addColorStop(1, 'rgba(255,255,220,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(l.x, l.y, l.r, 0, Math.PI * 2); ctx.fill();
+  if (l.susp > 0) {
+    // 警報までのゲージ（円の周りに表示）
+    ctx.strokeStyle = '#ff5030'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(l.x, l.y, l.r + 4, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * l.susp); ctx.stroke();
+  }
 }
 
 // プレイヤーの視界（青い扇形）
@@ -868,7 +1181,7 @@ function drawPlayerVision() {
 
 // 狙える見張りに照準マークを表示
 function drawReticle(g) {
-  const ready = player.cooldown <= 0;
+  const ready = player.cooldown <= 0 && player.ammo > 0;
   const r = 20 + Math.sin(elapsed * 8) * 2;
   ctx.strokeStyle = ready ? '#ff4040' : 'rgba(255,64,64,0.4)';
   ctx.lineWidth = 2;
@@ -887,6 +1200,20 @@ function drawShots() {
     ctx.strokeStyle = `rgba(200,255,255,${s.t * 4})`;
     ctx.lineWidth = 3;
     ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke();
+  }
+}
+
+// 弾薬箱
+function drawItems() {
+  for (const it of items) {
+    if (it.taken) continue;
+    const bob = Math.sin(elapsed * 4) * 2;
+    ctx.fillStyle = '#2e7d32';
+    ctx.fillRect(it.x - 10, it.y - 8 + bob, 20, 16);
+    ctx.strokeStyle = '#a5d6a7'; ctx.lineWidth = 2;
+    ctx.strokeRect(it.x - 10, it.y - 8 + bob, 20, 16);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('弾', it.x, it.y + 4 + bob);
   }
 }
 
@@ -932,7 +1259,7 @@ function drawGuard(g) {
 
 function drawPlayer() {
   const p = player;
-  if (p.invuln > 0 && Math.floor(p.invuln * 10) % 2 === 0) return;  // 点滅
+  if (p.invuln > 0 && Math.floor(p.invuln * 10) % 2 === 0) return;  // 捕まった直後は点滅
   ctx.save();
   ctx.translate(p.x, p.y);
   ctx.fillStyle = 'rgba(0,0,0,0.25)';
@@ -964,22 +1291,20 @@ function drawGoal() {
   ctx.fillRect(gx * TILE, gy * TILE, gw * TILE, gh * TILE);
   ctx.strokeStyle = '#8f8'; ctx.lineWidth = 2;
   ctx.strokeRect(gx * TILE, gy * TILE, gw * TILE, gh * TILE);
-  ctx.fillStyle = '#fff'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText('城門', (gx + gw / 2) * TILE, (gy + gh / 2) * TILE + 5);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(stage.goalLabel, (gx + gw / 2) * TILE, (gy + gh / 2) * TILE + 5);
 }
 
-// 画面上の情報（警戒度・ヒントなど）
+// 画面上の情報（警戒度・弾数・ヒントなど）
 function drawHUD() {
   const W = window.innerWidth, H = window.innerHeight;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  // ステージ名
+  // ステージ名・警戒度・弾数
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(10, 10, 230, 58);
+  ctx.fillRect(10, 10, 230, 78);
   ctx.fillStyle = '#fff'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'left';
   ctx.fillText(stage.name, 20, 30);
-
-  // 警戒度ゲージ
   ctx.font = '12px sans-serif';
   ctx.fillText('警戒度', 20, 52);
   ctx.fillStyle = '#333'; ctx.fillRect(68, 42, 160, 14);
@@ -987,16 +1312,21 @@ function drawHUD() {
   ctx.fillStyle = col; ctx.fillRect(68, 42, 160 * alertLevel / 100, 14);
   ctx.fillStyle = '#fff'; ctx.textAlign = 'right';
   ctx.fillText(Math.floor(alertLevel) + '%', 226, 53);
+  ctx.textAlign = 'left';
+  ctx.fillText('麻酔弾', 20, 76);
+  for (let i = 0; i < Math.min(player.ammo, 12); i++) {
+    ctx.fillStyle = '#9ef';
+    ctx.fillRect(68 + i * 13, 67, 8, 12);
+  }
+  if (player.ammo === 0) { ctx.fillStyle = '#f66'; ctx.fillText('弾切れ', 68, 76); }
 
   // 状態表示（ほふく／隠れている）
-  ctx.textAlign = 'right';
   ctx.font = 'bold 14px sans-serif';
   let status = player.crouch ? 'ほふく中' : '通常';
-  if (player.crouch && inBush(player.x, player.y)) status = '草むらに隠れている';
+  if (hidden()) status = '草むらに隠れている';
   // 画面が狭い（スマホ縦）ときは、ステージ名の下に並べる
   const narrow = W < 460;
-  const sx = narrow ? 10 : W - 190, sy = narrow ? 74 : 10;
-  ctx.textAlign = 'left';
+  const sx = narrow ? 10 : W - 190, sy = narrow ? 94 : 10;
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
   ctx.fillRect(sx, sy, 180, 28);
   ctx.fillStyle = player.crouch ? '#9ec3ff' : '#fff';
@@ -1004,16 +1334,11 @@ function drawHUD() {
 
   // 狙える見張りがいる時の案内
   if (findShotTarget()) {
-    ctx.fillStyle = player.cooldown > 0 ? 'rgba(120,40,40,0.8)' : 'rgba(200,40,40,0.8)';
+    const msg = player.ammo <= 0 ? '弾切れ' : player.cooldown > 0 ? '装填中…' : 'ACTION：麻酔銃';
+    ctx.fillStyle = player.ammo > 0 && player.cooldown <= 0 ? 'rgba(200,40,40,0.8)' : 'rgba(120,40,40,0.8)';
     ctx.fillRect(sx, sy + 34, 180, 28);
     ctx.fillStyle = '#fff';
-    ctx.fillText(player.cooldown > 0 ? '装填中…' : 'ACTION：麻酔銃', sx + 10, sy + 53);
-  }
-
-  // 捕まった時は画面全体を赤く光らせる
-  if (flashTimer > 0) {
-    ctx.fillStyle = `rgba(255,0,0,${flashTimer * 0.8})`;
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillText(msg, sx + 10, sy + 53);
   }
 
   // 見つかった時は画面のふちを赤く
@@ -1022,56 +1347,63 @@ function drawHUD() {
     ctx.lineWidth = 12;
     ctx.strokeRect(0, 0, W, H);
   }
-
-  // ヒント（画面上部中央付近）
-  const tx = player.x / TILE, ty = player.y / TILE;
-  let hint = introTimer > 0 ? stage.intro : '';
-  if (!hint) {
-    const h = stage.hints.find(h => tx >= h.area[0] && tx < h.area[0] + h.area[2] &&
-                                    ty >= h.area[1] && ty < h.area[1] + h.area[3]);
-    if (h) hint = h.text;
+  // 捕まった時は画面全体を赤く光らせる
+  if (flashTimer > 0) {
+    ctx.fillStyle = `rgba(255,0,0,${flashTimer * 0.8})`;
+    ctx.fillRect(0, 0, W, H);
   }
-  if (hint) drawTextBox(hint, W / 2, narrow ? 144 : 84, Math.min(W - (narrow ? 20 : 120), 560));
+
+  // ヒント：画面の一番下（操作ボタンの上）に数秒だけ表示し、だんだん消える
+  if (hintTimer > 0 && hintText) {
+    ctx.globalAlpha = Math.min(1, hintTimer);
+    const maxW = Math.min(W - 20, 520);
+    drawTextBox(hintText, W / 2, H - (narrow ? 210 : 70), maxW, true);
+    ctx.globalAlpha = 1;
+  }
 }
 
-// 折り返し付きのメッセージボックス
-function drawTextBox(text, cx, top, maxW) {
-  ctx.font = '14px sans-serif';
+// 折り返し付きのメッセージボックス（bottom が true なら top は下端の位置）
+function drawTextBox(text, cx, top, maxW, bottom) {
+  ctx.font = '13px sans-serif';
   const lines = [];
   let line = '';
   for (const ch of text) {
-    if (ctx.measureText(line + ch).width > maxW - 24) { lines.push(line); line = ch; }
+    if (ctx.measureText(line + ch).width > maxW - 20) { lines.push(line); line = ch; }
     else line += ch;
   }
   if (line) lines.push(line);
-  const h = lines.length * 20 + 14;
-  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  const h = lines.length * 18 + 10;
+  if (bottom) top -= h;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
   ctx.fillRect(cx - maxW / 2, top, maxW, h);
-  ctx.strokeStyle = 'rgba(158,195,255,0.6)'; ctx.lineWidth = 1;
-  ctx.strokeRect(cx - maxW / 2 + 0.5, top + 0.5, maxW - 1, h - 1);
   ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
-  lines.forEach((l, i) => ctx.fillText(l, cx, top + 24 + i * 20));
+  lines.forEach((l, i) => ctx.fillText(l, cx, top + 19 + i * 18));
+}
+
+// 文字が画面からはみ出さないよう、必要なら小さくして描く
+function fitText(text, x, y, size, bold, maxW) {
+  ctx.font = `${bold ? 'bold ' : ''}${size}px sans-serif`;
+  const w = ctx.measureText(text).width;
+  if (w > maxW) ctx.font = `${bold ? 'bold ' : ''}${Math.floor(size * maxW / w)}px sans-serif`;
+  ctx.fillText(text, x, y);
 }
 
 // タイトル・クリア・ゲームオーバーなどの全画面表示
-function drawScreen(title, sub, lines, color) {
+function drawScreen(title, sub, lines, color, footer) {
   const W = window.innerWidth, H = window.innerHeight;
+  const maxW = W - 24;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = 'rgba(0,0,0,0.75)';
   ctx.fillRect(0, 0, W, H);
   ctx.textAlign = 'center';
   ctx.fillStyle = color;
-  ctx.font = `bold ${Math.min(40, W / 12)}px sans-serif`;
-  ctx.fillText(title, W / 2, H * 0.3);
+  fitText(title, W / 2, H * 0.22, 40, true, maxW);
   ctx.fillStyle = '#ccc';
-  ctx.font = `${Math.min(18, W / 26)}px sans-serif`;
-  ctx.fillText(sub, W / 2, H * 0.3 + 38);
-  ctx.font = `${Math.min(15, W / 30)}px sans-serif`;
+  fitText(sub, W / 2, H * 0.22 + 38, 18, false, maxW);
   ctx.fillStyle = '#eee';
-  lines.forEach((l, i) => ctx.fillText(l, W / 2, H * 0.46 + i * 26));
+  lines.forEach((l, i) => fitText(l, W / 2, H * 0.36 + i * 24, 15, false, maxW));
   ctx.fillStyle = `rgba(255,255,255,${0.6 + Math.sin(performance.now() / 300) * 0.4})`;
-  ctx.font = `bold ${Math.min(18, W / 24)}px sans-serif`;
-  ctx.fillText('SPACE / ACTIONボタン / タップ で進む', W / 2, H * 0.82);
+  fitText(footer || 'SPACE / ACTIONボタン / タップ で進む', W / 2, H * 0.84, 18, true, maxW);
 }
 
 // タイトル画面の背景（簡単な城のシルエット）
@@ -1092,7 +1424,29 @@ function drawTitleBG() {
   ctx.fillRect(cx - 8, base - 150, 16, 22);
 }
 
+// タイトル画面のステージ選択ボタン
+function drawStageButtons() {
+  const W = window.innerWidth, H = window.innerHeight;
+  const bw = Math.min(150, (W - 40) / STAGES.length - 10), bh = 48;
+  const total = STAGES.length * (bw + 10) - 10;
+  titleButtons = [];
+  STAGES.forEach((s, i) => {
+    const x = W / 2 - total / 2 + i * (bw + 10), y = H * 0.66;
+    const locked = i >= unlocked;
+    titleButtons.push({ x, y, w: bw, h: bh, index: i, locked });
+    ctx.fillStyle = locked ? 'rgba(60,60,60,0.8)' : i === titleSelect ? 'rgba(255,207,106,0.9)' : 'rgba(30,30,40,0.85)';
+    ctx.fillRect(x, y, bw, bh);
+    ctx.strokeStyle = '#ffcf6a'; ctx.lineWidth = 2; ctx.strokeRect(x, y, bw, bh);
+    ctx.fillStyle = i === titleSelect && !locked ? '#111' : locked ? '#888' : '#fff';
+    ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('STAGE ' + (i + 1), x + bw / 2, y + 20);
+    ctx.font = '11px sans-serif';
+    ctx.fillText(locked ? '🔒 未解放' : s.name.replace(/^STAGE \d+\s+/, ''), x + bw / 2, y + 38);
+  });
+}
+
 function render() {
+  document.body.classList.toggle('menu', scene !== 'play');
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#111';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1100,11 +1454,12 @@ function render() {
   if (scene === 'title') {
     drawTitleBG();
     drawScreen('潜入作戦 ジャキ城奪還', '― ドラマ「VIVANT」モチーフのファンメイド潜入アクション ―', [
-      '見張りの視界（黄色い扇形）を避けて進め',
+      '見張りの視界（黄色）とサーチライトを避けて進め',
       '移動：矢印キー / 左下パッド',
-      '麻酔銃：SPACE / ACTION（自分の視界＝青い扇形の中の敵を眠らせる）',
+      '麻酔銃：SPACE / ACTION（青い視界の中の敵を眠らせる）',
       'ほふく：C / ほふくボタン　　音のON/OFF：M / 🔊',
-    ], '#ffcf6a');
+    ], '#ffcf6a', 'ステージを選んで SPACE / タップ で開始');
+    drawStageButtons();
     return;
   }
 
@@ -1117,25 +1472,28 @@ function render() {
 
   ctx.drawImage(staticLayer, 0, 0);
   drawGoal();
+  drawItems();
   drawPlayerVision();
   guards.forEach(drawVision);
   drawPlayer();
   guards.forEach(drawGuard);
-  const target = scene === 'play' ? findShotTarget() : null;
-  if (target) drawReticle(target);
-  drawShots();
   // 草むらはプレイヤーの上に半透明で重ねる（隠れている感じを出す）
   ctx.globalAlpha = 0.8;
   ctx.drawImage(bushLayer, 0, 0);
   ctx.globalAlpha = 1;
+  lights.forEach(drawLight);
+  const target = scene === 'play' ? findShotTarget() : null;
+  if (target) drawReticle(target);
+  drawShots();
 
   drawHUD();
 
   if (scene === 'clear') {
-    drawScreen('STAGE 1 CLEAR', '城門への潜入に成功した', [
+    const next = STAGES[stageIndex + 1];
+    drawScreen(`STAGE ${stageIndex + 1} CLEAR`, stage.clearText, [
       `タイム：${elapsed.toFixed(1)} 秒　／　最終警戒度：${Math.floor(alertLevel)}%`,
-      '次は「城壁・中庭」…（ステージ2は今後追加予定）',
-    ], '#8f8');
+      next ? `次は「${next.name.replace(/^STAGE \d+\s+/, '')}」` : '次は「地下牢」…（ステージ3は今後追加予定）',
+    ], '#8f8', next ? 'SPACE / タップ で次のステージへ' : 'SPACE / タップ でタイトルへ');
   } else if (scene === 'over') {
     drawScreen('GAME OVER', overReason, ['もう一度挑戦する'], '#ff5050');
   }
